@@ -27,6 +27,12 @@
 - 临时自检文件：`<项目根>\.tmp`
 - 备份：`<项目根>\backups`
 
+## 隐私边界
+
+- `docs/` 含真实群聊、计划、日志标记等本地资料，只保留本机，不进入 Git。
+- `data/`、`logs/`、`.env`、`backup_qq_session.ps1`、`restore_qq_session.ps1` 都不进入 Git。
+- 代码和测试中不使用真实 QQ 号、群号或成员名，统一使用测试占位号。
+
 ## 快速开始
 
 1. 复制 `config\.env.example` 为 `<项目根>\.env`，填写 API Key。
