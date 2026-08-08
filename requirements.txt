@@ -1,0 +1,4 @@
+websockets>=12,<16
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+DrissionPage>=4.0
