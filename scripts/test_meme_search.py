@@ -1,6 +1,6 @@
 """Meme/lyric search smoke test for the QQ bot pipeline.
 
-Run from <项目根>:
+Run from project root:
     python scripts/test_meme_search.py
 """
 
@@ -22,6 +22,7 @@ CASES = [
     ("给你两窝窝是什么梗", ["两窝窝"]),
     ("周杰伦简单爱歌词是什么", ["简单爱", "说不上为什么"]),
     ("周杰伦那天下雨了歌词是什么", ["那天下雨了", "车子缓缓的开"]),
+    ("周杰伦七月的极光歌词是什么", ["七月的极光", "夕阳落在加油站的玻璃上"]),
 ]
 
 
