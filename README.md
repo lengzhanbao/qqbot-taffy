@@ -5,14 +5,28 @@
 ## 目录
 
 - `bridge_qq.py`：主桥接，NapCat WebSocket 到模型 API
+- `qqbot_core/`：模块化核心包，目前包含 stats、safety、learning
 - `scripts/backup.ps1`：备份项目关键文件到 `<项目根>\backups`
 - `scripts/restore.ps1`：从 `<项目根>\backups` 恢复，恢复前自动备份当前文件
 - `scripts/status.ps1`：读取 `<项目根>\data\health.json` 查看机器人健康状态
-- `docs/`：计划、学习记录、Prompt 文档、问答对照等文档
+- `docs/public/`：可进入 Git 的脱敏文档
+- `docs/`：本地计划、学习记录、Prompt 文档、问答对照等资料，不进入 Git
 - `config/.env.example`：环境变量示例，真实 `.env` 在项目根目录
 - `tests/`：pytest 测试
+- `demo/`：脱敏 demo 说明与构建产物
 - `backups/`：所有备份，全部在 E 盘
 - `AGENTS.md`：项目级约束，包含 E 盘存储和删除确认规则
+
+详细文档：
+
+- [架构设计](docs/public/ARCHITECTURE.md)
+- [面试准备](docs/public/INTERVIEW.md)
+- [模块职责导览](docs/public/MODULE_GUIDE.md)
+- [完整函数清单](docs/public/MODULE_FUNCTIONS.md)
+- [复盘](docs/public/复盘_15天计划.md)
+- [贡献指南](CONTRIBUTING.md)
+
+开源协议：MIT，见 [LICENSE](LICENSE)
 
 ## 存储约定
 
@@ -24,38 +38,40 @@
 - 群风格画像：`<项目根>\data\group_profiles.json`
 - 日志：`<项目根>\logs\bridge.log`
 - 健康状态：`<项目根>\data\health.json`
+- 运行统计：`<项目根>\data\stats.json`
 - 临时自检文件：`<项目根>\.tmp`
 - 备份：`<项目根>\backups`
 
 ## 隐私边界
 
 - `docs/` 含真实群聊、计划、日志标记等本地资料，只保留本机，不进入 Git。
+- `docs/public/` 只放脱敏后的架构、面试、复盘文档，可进入 Git。
 - `data/`、`logs/`、`.env`、`backup_qq_session.ps1`、`restore_qq_session.ps1` 都不进入 Git。
 - 代码和测试中不使用真实 QQ 号、群号或成员名，统一使用测试占位号。
 
 ## 快速开始
 
-1. 复制 `config\.env.example` 为 `<项目根>\.env`，填写 API Key。
+1. 复制 `config\.env.example` 为 `.env`，填写 API Key。
 2. 启动 NapCat，确认 `3001/6099` 端口可用；端口可通过 `QQ_WS_URL`、`QQ_ONEBOT_HTTP_URL` 调整。
 3. 用隐藏方式启动桥接：
 
 ```powershell
-Start-Process -FilePath "<用户目录>\AppData\Local\Programs\Python\Python311\pythonw.exe" `
-    -ArgumentList "<项目根>\bridge_qq.py" `
-    -WorkingDirectory "<项目根>" `
+Start-Process -FilePath "pythonw.exe" `
+    -ArgumentList "bridge_qq.py" `
+    -WorkingDirectory (Get-Location) `
     -WindowStyle Hidden
 ```
 
 ## 测试
 
 ```powershell
-& "<用户目录>\AppData\Local\Programs\Python\Python311\python.exe" -m pytest tests/ -q
+python -m pytest tests/ -q
 ```
 
 梗/歌词搜索冒烟测试会真实联网并写入 `logs/bridge.log`：
 
 ```powershell
-& "<用户目录>\AppData\Local\Programs\Python\Python311\python.exe" scripts/test_meme_search.py
+python scripts/test_meme_search.py
 ```
 
 ## Git
@@ -74,6 +90,39 @@ Start-Process -FilePath "<用户目录>\AppData\Local\Programs\Python\Python311\
 - `!clear_memory`：清空所有记忆，需二次确认，执行前自动备份
 
 非管理员发送这些指令会被静默忽略。
+
+## 运行统计
+
+`data/stats.json` 会记录：
+
+- 消息数、回复数、平均耗时
+- 模型调用、成功、失败、熔断次数
+- 搜索调用、成功、失败、缓存命中
+- 安全拦截次数
+
+查看：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 <项目根>\data\stats.json
+```
+
+## 回答来源标注
+
+最终回答会追加：
+
+- `（联网搜过喵）`
+- `（联网搜了但没查到，塔菲凭现有知识答的喵）`
+- `（没联网，塔菲凭现有知识答的喵）`
+
+这样用户能直接判断答案是否经过网络搜索验证。
+
+## 搜索行为
+
+`QQ_ALWAYS_SEARCH=1` 时：
+
+- 搜索工具对所有消息开放。
+- 模型第一轮即使没调用搜索，也会忽略直接回复并强制走通用联网兜底。
+- 只有 `QQ_ALWAYS_SEARCH=0` 时，才可能保留模型未联网的直接回答。
 
 ## 备份与恢复
 

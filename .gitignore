@@ -1,11 +1,14 @@
 .env
+SETUP.md
 .coverage
 .bridge_qq.lock
 data/
 logs/
 archive/
 tools/
-docs/
+docs/*
+!docs/public/
+!docs/public/**
 backup_qq_session.ps1
 restore_qq_session.ps1
 bridge_sessions.json
@@ -39,3 +42,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .tmp/
+demo/build_*/
+refactor/
