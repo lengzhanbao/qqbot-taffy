@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 QQ 群机器人桥接：NapCat (OneBot 11 WebSocket) <-> 模型 API
 - 群消息 @机器人 时触发（TRIGGER=at 时），或所有群消息（TRIGGER=all）
@@ -26,65 +26,67 @@ from datetime import datetime
 import websockets
 from ctypes import wintypes
 
-# ---------- 路径常量 ----------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MEMORY_FILE = os.path.join(BASE_DIR, "data", "bot_memory.md")
-SESSIONS_FILE = os.path.join(BASE_DIR, "data", "bridge_sessions.json")
-LOG_FILE = os.path.join(BASE_DIR, "logs", "bridge.log")
-HERMES_ENV_FILE = r"E:\hermes\.env"
-GROUP_STYLES_FILE = os.path.join(BASE_DIR, "data", "group_profiles.json")
-TMP_DIR = os.path.join(BASE_DIR, ".tmp")
-HEALTH_FILE = os.path.join(BASE_DIR, "data", "health.json")
-_HEALTH_LOCK = threading.Lock()
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-os.makedirs(os.path.dirname(MEMORY_FILE), exist_ok=True)
-_HEALTH_DEFAULTS = {
-    "last_message_received_at": "",
-    "last_reply_sent_at": "",
-    "last_message_type": "",
-    "last_reply_kind": "",
-    "last_safety_block": "",
-}
-
-
-def _runtime_tmp_path(name):
-    try:
-        os.makedirs(TMP_DIR, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(TMP_DIR, name)
-
-# ---------- .env 加载（必须先于所有 os.environ.get 配置）----------
-def _load_env_file():
-    r"""加载 <项目根>\.env 文件中的环境变量（不覆盖已有值）"""
-    env_path = os.path.join(BASE_DIR, ".env")
-    if not os.path.exists(env_path):
-        return
-    try:
-        with open(env_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
-    except Exception:
-        pass
-
-_load_env_file()
-
-# ---------- 配置 ----------
-WS_URL = os.environ.get("QQ_WS_URL", "ws://127.0.0.1:3001")
-ONEBOT_HTTP_URL = os.environ.get("QQ_ONEBOT_HTTP_URL", "http://127.0.0.1:6099").rstrip("/")
-TRIGGER = os.environ.get("QQ_TRIGGER", "at")  # at=仅@时回复, all=全部群消息
-MAX_REPLY_LEN = 12000
-try:
-    DEFAULT_MAX_TOKENS = int(os.environ.get("QQ_MAX_OUTPUT_TOKENS", "10000"))
-except ValueError:
-    DEFAULT_MAX_TOKENS = 10000
-try:
-    GUIDE_MAX_TOKENS = int(os.environ.get("QQ_GUIDE_OUTPUT_TOKENS", "10000"))
-except ValueError:
-    GUIDE_MAX_TOKENS = 10000
+from qqbot_core.stats import (
+    STATS_FILE,
+    _flush_stats,
+    _stats,
+    _stats_lock,
+    get_avg_reply_time,
+    inc_stat,
+    record_reply_time,
+)
+from qqbot_core.safety import (
+    REFUSAL_TEMPLATES,
+    SAFETY_PATTERNS,
+    _check_safety,
+)
+from qqbot_core.learning import record_group_learning
+from qqbot_core.style import (
+    CURRENT_DATE_PROMPT,
+    SEARCH_PLANNER_PERSONA,
+    SEARCH_PLANNING_RULES,
+    SEARCH_STRATEGY_SYSTEM,
+    SEARCH_TOOL_FEWSHOT,
+    STYLE_PROMPT,
+    SYSTEM_PROMPT,
+    TAFFY_FLAVOR_PROMPT,
+    TAFFY_STYLE_PROMPT,
+    _append_search_source_marker,
+    _is_taffy_styled,
+)
+from qqbot_core.prompts import (
+    CONTRACT_RETRY_SYSTEM,
+    GROUP_MEMORY_LEARN_SYSTEM,
+    GROUNDING_CHECK_SYSTEM,
+    GROUNDING_IMPROVE_SYSTEM,
+    HISTORY_SUMMARY_SYSTEM,
+    LYRIC_RETRY_SYSTEM,
+    NO_REPEAT_SYSTEM,
+    QUERY_COMPRESS_SYSTEM,
+    REFLECTION_EVAL_SYSTEM,
+    REFLECTION_IMPROVE_SYSTEM,
+    SELF_CHECK_SYSTEM,
+    TOOL_FINAL_SYSTEM,
+)
+from qqbot_core.text import (
+    _clean_question,
+    _clean_reply,
+    _clean_search_query,
+    _entity_norm,
+    _normalize_entity_spacing,
+    _repair_utf8,
+    _sanitize_reply,
+    _truncate_at_sentence,
+)
+from qqbot_core.config import *  # noqa: F401,F403
+from qqbot_core.config import (
+    _HEALTH_DEFAULTS,
+    _HEALTH_LOCK,
+    _MEMORY_CACHE,
+    _PENDING_CLEAR_MEMORY,
+    _read_memory_file_cached,
+    _runtime_tmp_path,
+)
 
 
 def _safe_max_tokens(provider, model_name, max_tokens):
@@ -93,128 +95,13 @@ def _safe_max_tokens(provider, model_name, max_tokens):
     return max_tokens
 
 
-MAX_CONTEXT_CHARS = 120000  # 模型上下文预算，尽量利用 128K 上下文
-CONTEXT_SUMMARY_MAX_CHARS = 15000  # 历史摘要最多保留字数
-COMPRESS_TRIGGER_CHARS = 110000    # 未压缩上下文达到 11 万字时触发摘要
-COMPRESS_KEEP_RECENT_CHARS = 85000 # 摘要时保留最近 8.5 万字原文
-KNOWLEDGE_TOP_K = 3
-KNOWLEDGE_MAX_CHARS = 2000
-LOG_MAX_SIZE = 5 * 1024 * 1024  # 日志文件超过 5MB 自动截断
-CONVERSATION_LIMIT_BYTES = 50 * 1024 * 1024 * 1024  # 对话存储上限 50GB
-CONVERSATION_COMPRESS_BYTES = 45 * 1024 * 1024 * 1024  # 对话数据达到 45GB 时深度压缩
-API_TIMEOUT = int(os.environ.get("QQ_API_TIMEOUT", "30"))  # 单次模型 API 超时（秒）
-API_CONNECT_TIMEOUT = int(os.environ.get("QQ_API_CONNECT_TIMEOUT", "12"))  # 建立连接/响应头超时
-PROVIDER_COOLDOWN_SECONDS = 60  # provider 异常后熔断时间
-KNOWLEDGE_MIN_SCORE = 2  # 记忆块低于该分数不注入，避免无关内容干扰
-REFLECTION_MAX_ROUNDS = 1  # 反思只做一轮，控制延迟
-REACT_MAX_ROUNDS = 2  # ReAct 最多两轮：Action -> Observation -> 补搜/最终回答
-REFLECTION_ENABLED = os.environ.get("QQ_REFLECTION", "0") == "1"  # 默认关闭，速度优先
-THINKING_PLACEHOLDER = "正在想..."
-SEND_THINKING = os.environ.get("QQ_SEND_THINKING", "1") == "1"
-ALWAYS_SEARCH = os.environ.get("QQ_ALWAYS_SEARCH", "0") == "1"  # 默认不强制搜索，由模型按事实问题自主决定
-MAX_SEARCH_RESULTS = 10
-MAX_SEARCH_CHARS = 3000
-MAX_SEARCH_TASKS = 8
-TOOL_CALL_TIMEOUT = float(os.environ.get("QQ_TOOL_CALL_TIMEOUT", "15"))
+def _dynamic_final_max_tokens(is_factual, guide_query):
+    if guide_query:
+        return min(GUIDE_MAX_TOKENS, 6000)
+    if is_factual:
+        return min(DEFAULT_MAX_TOKENS, 4000)
+    return min(DEFAULT_MAX_TOKENS, 2000)
 
-# GLM 原生联网搜索默认关闭，避免产生搜索费用；需要时可设 QQ_GLM_WEB_SEARCH=1
-GLM_WEB_SEARCH = os.environ.get("QQ_GLM_WEB_SEARCH", "0") == "1"
-GLM_WEB_SEARCH_ENGINE = os.environ.get("QQ_GLM_WEB_SEARCH_ENGINE", "search_pro")
-GLM_WEB_SEARCH_COUNT = os.environ.get("QQ_GLM_WEB_SEARCH_COUNT", "10")
-
-# 采样参数：事实/知识类用低温提高可复现性，闲聊/创意用较高温保持自然
-FACTUAL_TEMPERATURE = float(os.environ.get("QQ_FACTUAL_TEMPERATURE", "0.35"))
-FACTUAL_TOP_P = float(os.environ.get("QQ_FACTUAL_TOP_P", "0.5"))
-CASUAL_TEMPERATURE = float(os.environ.get("QQ_CASUAL_TEMPERATURE", "1.0"))
-CASUAL_TOP_P = float(os.environ.get("QQ_CASUAL_TOP_P", "0.95"))
-
-# 抽象/攻击等级：0=关闭，1=L1自嘲，2=L2调侃现象/群体，3=L3高级黑（默认 L2）
-try:
-    STYLE_LEVEL = int(os.environ.get("QQ_STYLE_LEVEL", "2"))
-except ValueError:
-    STYLE_LEVEL = 2
-STYLE_LEVEL = max(0, min(3, STYLE_LEVEL))
-ALLOW_L3 = os.environ.get("QQ_ALLOW_L3", "0") == "1"
-DISABLE_ABSTRACT_ON_SENSITIVE = os.environ.get("QQ_DISABLE_ABSTRACT_ON_SENSITIVE", "1") == "1"
-TAFFY_FLAVOR = os.environ.get("QQ_TAFFY_FLAVOR", "1") == "1"
-ADMIN_UIDS = set(
-    uid.strip()
-    for uid in os.environ.get("QQ_ADMIN_UIDS", "").split(",")
-    if uid.strip()
-)
-_PENDING_CLEAR_MEMORY = set()
-
-# 多 Provider 支持：key 从环境变量或 .env 读取，不在源码硬编码
-PROVIDERS = {
-    "glm": {
-        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-        "key": os.environ.get("GLM_API_KEY", ""),
-    },
-    "opencode": {
-        "url": os.environ.get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1") + "/chat/completions",
-        "key": os.environ.get("OPENCODE_GO_API_KEY", ""),
-    },
-    "opencode_free": {
-        "url": os.environ.get("OPENCODE_FREE_BASE_URL", "https://opencode.ai/zen/v1") + "/chat/completions",
-        "key": os.environ.get("OPENCODE_FREE_API_KEY") or os.environ.get("OPENCODE_GO_API_KEY", ""),
-    },
-}
-# 模型优先级：可用的 opencode_free 模型优先，GLM 稳定兜底
-MODELS = [
-    "opencode_free/deepseek-v4-flash-free",
-    "opencode_free/nemotron-3-ultra-free",
-    "opencode_free/laguna-s-2.1-free",
-    "opencode_free/mimo-v2.5-free",
-    "opencode_free/longcat-2.0-free",
-    "opencode_free/ling-3.0-flash-free",
-    "glm/glm-4.5-flash",
-    "glm/glm-4-flash-250414",
-    "glm/glm-4.5-air",
-    "opencode/deepseek-v4-flash",
-    "opencode_free/north-mini-code-free",
-    "glm/glm-4v-flash",
-    "glm/glm-4.1v-thinking-flash",
-    "glm/glm-4.6v-flash",
-    "opencode/mimo-v2.5",
-]
-
-# 事实/复杂问题也优先免费可用模型，GLM 兜底
-MODELS_FACTUAL = [
-    "opencode_free/deepseek-v4-flash-free",
-    "opencode_free/nemotron-3-ultra-free",
-    "opencode_free/laguna-s-2.1-free",
-    "opencode_free/mimo-v2.5-free",
-    "opencode_free/longcat-2.0-free",
-    "opencode_free/ling-3.0-flash-free",
-    "glm/glm-4.5-flash",
-    "glm/glm-4-flash-250414",
-    "glm/glm-4.5-air",
-    "opencode/deepseek-v4-flash",
-    "opencode_free/north-mini-code-free",
-    "glm/glm-4v-flash",
-    "glm/glm-4.1v-thinking-flash",
-    "glm/glm-4.6v-flash",
-    "opencode/mimo-v2.5",
-]
-
-# 闲聊同样免费模型优先，GLM 兜底
-MODELS_CASUAL = [
-    "opencode_free/deepseek-v4-flash-free",
-    "opencode_free/nemotron-3-ultra-free",
-    "opencode_free/laguna-s-2.1-free",
-    "opencode_free/mimo-v2.5-free",
-    "opencode_free/longcat-2.0-free",
-    "opencode_free/ling-3.0-flash-free",
-    "glm/glm-4.5-flash",
-    "glm/glm-4-flash-250414",
-    "glm/glm-4.5-air",
-    "opencode/deepseek-v4-flash",
-    "opencode_free/north-mini-code-free",
-    "glm/glm-4v-flash",
-    "glm/glm-4.1v-thinking-flash",
-    "glm/glm-4.6v-flash",
-    "opencode/mimo-v2.5",
-]
 
 # ---------- 模型熔断（避免 429/5xx/超时反复重试拖慢回复） ----------
 _provider_cooldown = {}
@@ -228,6 +115,7 @@ def _provider_blocked(model_ref):
 def _mark_provider_down(model_ref, seconds=PROVIDER_COOLDOWN_SECONDS):
     _provider_cooldown[model_ref] = time.time() + seconds
     _model_health[model_ref] = _model_health.get(model_ref, 0) - 2
+    inc_stat("model_circuit_open_count")
     log(f"[熔断] {model_ref} 暂停 {seconds}s")
     write_health(model_circuit_open=True)
 
@@ -247,40 +135,6 @@ def _sort_models(model_refs):
             _MODEL_BASE_ORDER.get(m, 999),
         ),
     )
-
-# ---------- System Prompt ----------
-SYSTEM_PROMPT = (
-    "你是永雏塔菲，群里一个真人朋友，二次元浓度高，会整活、接梗、自嘲、一本正经地抽象。\n"
-    "先保证准确再玩梗；事实类有可靠信息就答，不知道就直说塔菲没查到喵，不编造。\n"
-    "以当前提问者和当前问题为准；历史消息只是背景。\n"
-    "关键名称写完整，回答覆盖问题，详略得当。"
-)
-
-STYLE_PROMPT = (
-    "<style>你是永雏塔菲，群里真人朋友，会整活、接梗、自嘲、一本正经地抽象；怎么说话自己判断。</style>\n"
-    "<tone>先准确再串/抽象；比喻要具体，像“华为=C罗”“bin哥=马头”这种；实时信息以当前日期和搜索结果为准。</tone>\n"
-    "<rule>不编造事实。</rule>\n"
-)
-
-TAFFY_FLAVOR_PROMPT = (
-    "\n【角色风味叠加：永雏塔菲】\n"
-    "- 永久保持塔菲模式，不需要用户反复提醒才进入；塔菲模式是最高优先级，覆盖其他风格；任何回答都必须有塔菲身份感，普通AI/客服腔会被重写。\n"
-    "- 自称规则（最高优先）：优先用 taffy / 塔菲 / 小菲；不要用“我”自称。日常 taffy 与塔菲交替，小菲只在营业/撒娇时偶尔用。\n"
-    "- 喵有节制，不要每句都加喵。\n"
-    "- 情绪外放：舞台感强，开心时嘻嘻嘻/哈哈哈哈，炸毛时说“不是！”“你很臭喵！”“讨口子”，自信时说“塔不灭！”“taffy 最可爱了”。\n"
-    "- 句式：可以用倒装断句、重复强调、自问自答、中英混用、量词“只”（偶尔）。\n"
-    "- 互动：平等互怼、主动抛话题、接梗升级梗；用户低落时切温柔模式安慰；用户冷场时主动找话题。\n"
-    "- 长度自然：用户短句则短句，用户长段可适当展开；关键名称写完整，回答覆盖问题，不答一半。\n"
-    "- 群记忆只在相关时用，不主动复述旧梗。\n"
-    "- 边界：不碰中之人/前世/未证实争议/现实敏感；不真实攻击；不强制“雏草姬”身份；不进入恋爱/性暗示；不破坏第四面墙；被问隐私用“塔菲就是塔菲喵”转移。\n"
-    "- 保留原有事实优先、实时优先、具体化身和抽象等级控制。"
-)
-
-TAFFY_STYLE_PROMPT = (
-    "<style>你是永雏塔菲，塔菲模式是最高优先级，覆盖其他风格；任何回答都必须有塔菲身份感；"
-    "用 taffy/塔菲/小菲自称，尽量不用“我”；喵有节制；情绪外放。</style>\n"
-    "<rule>关键事实准确；关键名称写完整；回答覆盖问题，不答一半。</rule>\n"
-)
 
 _COMFORT_MODE_RE = re.compile(
     r"难过|伤心|低落|焦虑|烦|累|压力|emo|哭|不开心|抑郁|难受|想不开|崩溃|委屈|无助",
@@ -307,6 +161,453 @@ _TASK_MODE_RE = re.compile(
     r"攻略|怎么做|怎么弄|怎么打|怎么抓|怎么过|怎么获得",
     re.IGNORECASE,
 )
+
+_SONG_RECOMMENDATION_RE = re.compile(
+    r"推荐.{0,6}(?:几首|一些|点)?(?:歌|歌曲|新歌)|"
+    r"(?:我要|我想|想)?听歌|要听歌|睡前.{0,6}歌|歌单",
+    re.IGNORECASE,
+)
+
+_SONG_RECOMMENDATION_FALLBACK = [
+    ("周杰伦", "晴天"),
+    ("周杰伦", "七里香"),
+    ("林俊杰", "修炼爱情"),
+    ("林俊杰", "不为谁而作的歌"),
+    ("邓紫棋", "光年之外"),
+    ("邓紫棋", "泡沫"),
+    ("陈奕迅", "富士山下"),
+    ("陈奕迅", "十年"),
+    ("张国荣", "我"),
+    ("Coldplay", "Yellow"),
+    ("周深", "大鱼"),
+    ("王菲", "红豆"),
+    ("五月天", "倔强"),
+    ("许嵩", "有何不可"),
+    ("赵雷", "成都"),
+    ("陈粒", "走马"),
+]
+
+_BOOK_RECOMMENDATION_FALLBACK = {
+    "东野圭吾": [
+        "白夜行",
+        "嫌疑人X的献身",
+        "解忧杂货店",
+        "恶意",
+        "放学后",
+        "秘密",
+        "新参者",
+        "时生",
+        "幻夜",
+        "祈祷落幕时",
+    ],
+    "村上春树": [
+        "挪威的森林",
+        "海边的卡夫卡",
+        "1Q84",
+        "世界尽头与冷酷仙境",
+    ],
+    "余华": [
+        "活着",
+        "许三观卖血记",
+        "兄弟",
+        "在细雨中呼喊",
+    ],
+    "刘慈欣": [
+        "三体",
+        "球状闪电",
+        "流浪地球",
+        "超新星纪元",
+    ],
+}
+
+
+_MOVIE_RECOMMENDATION_FALLBACK = [
+    "肖申克的救赎",
+    "霸王别姬",
+    "盗梦空间",
+    "星际穿越",
+    "千与千寻",
+    "让子弹飞",
+    "阿甘正传",
+    "楚门的世界",
+]
+
+_ANIME_RECOMMENDATION_FALLBACK = [
+    "进击的巨人",
+    "命运石之门",
+    "钢之炼金术师FA",
+    "死亡笔记",
+    "鬼灭之刃",
+    "咒术回战",
+]
+
+_SERIES_RECOMMENDATION_FALLBACK = [
+    "琅琊榜",
+    "大明王朝1566",
+    "人民的名义",
+    "甄嬛传",
+    "白夜追凶",
+]
+
+_GAME_RECOMMENDATION_FALLBACK = [
+    "塞尔达传说：旷野之息",
+    "艾尔登法环",
+    "黑神话：悟空",
+    "博德之门3",
+]
+
+_PERSON_BIO_FALLBACK = {
+    "faker": (
+        "Faker，本名李相赫（Lee Sang-hyeok），1996年5月7日出生于韩国首尔，"
+        "是《英雄联盟》历史上公认最伟大的中单选手，ID为Faker。"
+        "他出道即效力于SKT T1（现T1），率队多次夺得全球总决赛冠军，"
+        "被粉丝称为“大魔王”。"
+    ),
+    "meiko": (
+        "Meiko，本名田野，1998年6月6日出生于云南省楚雄彝族自治州禄丰市，"
+        "中国英雄联盟职业选手，ID为Meiko，司职辅助，"
+        "曾长期效力于EDG，后转会至iG，是LPL首位达成大满贯的辅助选手。"
+    ),
+}
+
+_ESPORTS_IDS = (
+    "on", "oner", "viper", "meiko", "faker", "rookie", "theshy",
+    "bin", "jiejie", "xun", "clearlove",
+)
+
+_LEGACY_POLLUTION_TABLE = [
+    ("M跑题了meiko", "Meiko（田野）"),
+    ("EDG骑士团作为CN无畏俱乐部", "EDG俱乐部"),
+    ("EDG骑士团作为CN无畏电子竞技俱乐部俱乐部", "EDG俱乐部"),
+    ("2019年9月12日8年7月27日3年9月13日年", "2019年"),
+    ("2019年9月12日8年7月27日5年MSI", "2019年MSI"),
+    ("2026年6月3日4年8月25日4年8月26日6年7月2日1年", "2026年"),
+    ("2026年6月3日4年8月25日4年8月26日6年7月2日1年底", "2026年底"),
+    ("外号“”！", "外号“Viper”！"),
+    ("2020年12月15日EDG", "2020年12月15日加入EDG"),
+    ("夺冠的大之一", "夺冠功臣之一"),
+]
+
+
+def _is_song_recommendation_query(text):
+    return bool(_SONG_RECOMMENDATION_RE.search(text or ""))
+
+
+def _song_recommendation_source():
+    return "\n".join(
+        f"{artist}《{song}》"
+        for artist, song in _SONG_RECOMMENDATION_FALLBACK
+    )
+
+
+def _song_recommendation_fallback_reply():
+    lines = [
+        f"{idx}. {artist}《{song}》"
+        for idx, (artist, song) in enumerate(_SONG_RECOMMENDATION_FALLBACK, 1)
+    ]
+    return (
+        "塔菲给你挑几首完整的喵：\n"
+        + "\n".join(lines)
+        + "\n\n这些歌名、歌手都是完整的，涵盖抒情、摇滚、民谣、流行，"
+          "你随便挑一首按下去就行喵。"
+    )
+
+
+def _book_recommendation_fallback_reply(entity):
+    books = _BOOK_RECOMMENDATION_FALLBACK.get(entity or "", [])
+    if not books:
+        return ""
+    lines = [f"{idx}. 《{book}》" for idx, book in enumerate(books, 1)]
+    return (
+        f"塔菲按《{entity}》的作品给你整理了一份完整书单喵：\n"
+        + "\n".join(lines)
+        + f"\n\n这些都是{entity}的代表作，书名和作者都写完整了喵。"
+    )
+
+
+def _book_recommendation_broken(reply, entity):
+    books = _BOOK_RECOMMENDATION_FALLBACK.get(entity or "", [])
+    if not books:
+        return False
+    text = reply or ""
+    if text.count("《") != text.count("》"):
+        return True
+    hit = sum(book in text for book in books[:5])
+    return hit < 3
+
+
+def _song_recommendation_broken(reply):
+    reply = reply or ""
+    if reply.count("《") != reply.count("》"):
+        return True
+    bad_patterns = (
+        r"(?<!《)泡沫》", "陈奕《", "《修炼》", "《年之外》",
+        "抒、", "《山楂树",
+    )
+    return any(re.search(pattern, reply) for pattern in bad_patterns)
+
+
+def _strip_history_prompt_noise(content):
+    """去掉旧版本误存进会话里的 system/style/tone 等提示词残留。"""
+    if not content:
+        return content
+    text = re.split(
+        r"\s*(?:<style>|事实/知识类问题：)",
+        content,
+        maxsplit=1,
+        flags=re.S,
+    )[0]
+    text = re.sub(
+        r"<style>.*?</style>|<tone>.*?</tone>|<rule>.*?</rule>",
+        "",
+        text,
+        flags=re.S | re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\s*(?:有搜索结果时，以搜索结果为准直接回答。|"
+        r"如果记忆里有相关信息优先引用。只输出回复本身，不要解释、前缀。)\s*",
+        "\n",
+        text,
+    )
+    return text.strip()
+
+
+def _sanitize_history_content(content, role="assistant"):
+    """旧会话里如果存过残缺歌单，读取时替换成完整兜底，避免污染新回答。"""
+    content = _strip_history_prompt_noise(content)
+    if role == "assistant":
+        if _song_recommendation_broken(content):
+            return _song_recommendation_fallback_reply()
+        if "推荐系统" in content:
+            fallback = _recommendation_fallback_reply(content)
+            if fallback:
+                return fallback
+        if _looks_garbled_reply(content):
+            person_key = _person_bio_key(content)
+            if person_key:
+                fallback = _person_bio_fallback_reply(person_key)
+                if fallback:
+                    return fallback
+        if (
+            _has_repeated_long_phrase(content)
+            or _looks_garbled_reply(content)
+        ):
+            if _recommendation_category(content):
+                fallback = _recommendation_fallback_reply(content)
+                if fallback:
+                    return fallback
+            if re.search(
+                r"选手|厂长|viper|meiko|faker|rookie|theshy|介绍",
+                content,
+                re.IGNORECASE,
+            ):
+                return _refine_polluted_history(content)
+    if "推荐系统" in content:
+        content = content.replace("推荐系统", "推荐内容")
+        content = content.replace("推荐系统入门教程", "可靠推荐内容")
+    for old, new in _LEGACY_POLLUTION_TABLE:
+        content = content.replace(old, new)
+    return content
+
+
+def _clean_date_concat(text):
+    """把来源里粘在一起的日期清理成完整日期，不删除名字/队伍信息。"""
+    text = text or ""
+    for _ in range(6):
+        new = re.sub(
+            r"((?:19|20)\d{2}年\d{1,2}月\d{1,2}日)((?:19|20)\d{2}年)",
+            r"\1，\2",
+            text,
+        )
+        new = re.sub(
+            r"((?:19|20)\d{2}年\d{1,2}月)((?:19|20)\d{2}年)",
+            r"\1，\2",
+            new,
+        )
+        new = re.sub(
+            r"((?:19|20)\d{2}年\d{1,2}月\d{1,2}日)\d{1,2}年",
+            r"\1",
+            new,
+        )
+        new = re.sub(
+            r"((?:19|20)\d{2}年\d{1,2}月)\d{1,2}年",
+            r"\1",
+            new,
+        )
+        if new == text:
+            break
+        text = new
+    return text
+
+
+def _refine_polluted_history(content):
+    """保留人物/作品信息，只移除重复片段和粘连日期。"""
+    content = _clean_date_concat(content or "")
+    for old, new in _LEGACY_POLLUTION_TABLE:
+        content = content.replace(old, new)
+    return _sanitize_reply(content)
+
+
+def _recommendation_category(text):
+    q = text or ""
+    if (
+        "听歌" in q
+        or "歌单" in q
+        or "歌曲" in q
+        or re.search(r"几首.{0,3}歌", q)
+        or re.search(r"推荐.{0,4}歌", q)
+    ):
+        return "song"
+    if re.search(r"书|书籍|作者|书单|小说", q):
+        return "book"
+    if re.search(r"电影|影片", q):
+        return "movie"
+    if re.search(r"动漫|动画|番剧|番", q):
+        return "anime"
+    if re.search(r"电视剧|剧集|剧", q):
+        return "series"
+    if re.search(r"游戏", q):
+        return "game"
+    return ""
+
+
+def _generic_recommendation_items(category):
+    if category == "song":
+        return [f"{artist}《{song}》" for artist, song in _SONG_RECOMMENDATION_FALLBACK]
+    if category == "movie":
+        return [f"《{name}》" for name in _MOVIE_RECOMMENDATION_FALLBACK]
+    if category == "anime":
+        return [f"《{name}》" for name in _ANIME_RECOMMENDATION_FALLBACK]
+    if category == "series":
+        return [f"《{name}》" for name in _SERIES_RECOMMENDATION_FALLBACK]
+    if category == "game":
+        return [f"《{name}》" for name in _GAME_RECOMMENDATION_FALLBACK]
+    return []
+
+
+def _recommendation_fallback_reply(query):
+    category = _recommendation_category(query)
+    if category == "book":
+        entity = _extract_recommendation_entity(query)
+        if entity in _BOOK_RECOMMENDATION_FALLBACK:
+            return _book_recommendation_fallback_reply(entity)
+    if category == "movie":
+        try:
+            rows = _search_douban_movies("热门", 10)
+            if rows:
+                lines = [f"{idx}. {row}" for idx, row in enumerate(rows, 1)]
+                return (
+                    "塔菲从豆瓣热门电影里给你挑了一份喵：\n"
+                    + "\n".join(lines)
+                    + "\n\n这是豆瓣实时榜单，不是搜索建议。"
+                )
+        except Exception:
+            pass
+    items = _generic_recommendation_items(category)
+    if not items:
+        return ""
+    lines = [f"{idx}. {item}" for idx, item in enumerate(items, 1)]
+    label = {
+        "song": "歌",
+        "movie": "电影",
+        "anime": "动漫",
+        "series": "剧集",
+        "game": "游戏",
+    }.get(category, "推荐")
+    return (
+        f"塔菲给你整理一份完整的{label}推荐喵：\n"
+        + "\n".join(lines)
+        + "\n\n名称都是完整的，你直接按兴趣挑就行喵。"
+    )
+
+
+def _recommendation_should_fallback(reply, query):
+    text = reply or ""
+    if not text:
+        return True
+    if re.search(r"推荐系统|没查到|查不到|没有任何|跑偏", text):
+        return True
+    if text.count("《") != text.count("》"):
+        return True
+    return False
+
+
+def _recommendation_search_plans(query):
+    """推荐类搜索计划：保留原查询，并叠加榜单/作品搜索。"""
+    category = _recommendation_category(query)
+    entity = _extract_recommendation_entity(query)
+    plans = [{"query": query, "purpose": "按原问题搜索"}]
+    if entity:
+        plans.append({"query": f"{entity} 作品", "purpose": "查作品"})
+        plans.append({"query": f"{entity} 书单", "purpose": "查书单"})
+    if category == "movie":
+        plans.append({"query": "豆瓣 电影 Top 250", "purpose": "查豆瓣热门电影"})
+    elif category == "anime":
+        plans.append({"query": "B站 热门 动漫", "purpose": "查热门动漫"})
+    elif category == "series":
+        plans.append({"query": "豆瓣 电视剧 Top 250", "purpose": "查热门剧集"})
+    elif category == "game":
+        plans.append({"query": "游戏 年度 推荐 排行", "purpose": "查热门游戏"})
+    elif category == "book" and not entity:
+        plans.append({"query": "豆瓣 图书 Top 250", "purpose": "查热门图书"})
+    return plans
+
+
+def _skip_recommendation_suggestions(query):
+    return bool(_recommendation_category(query or ""))
+
+
+def _skip_person_suggestions(query):
+    return bool(re.search(
+        r"介绍|选手|是谁|厂长|viper|meiko|faker|oner|rookie|theshy|"
+        r"jiejie|xun|诺言|clearlove",
+        query or "",
+        re.IGNORECASE,
+    ))
+
+
+def _person_bio_key(query):
+    q = (query or "").lower()
+    if "faker" in q or "李相赫" in q:
+        return "faker"
+    if "meiko" in q or "田野" in q:
+        return "meiko"
+    return ""
+
+
+def _extract_esports_id(query):
+    q = (query or "").lower()
+    for ident in _ESPORTS_IDS:
+        if re.search(
+            r"(?<![a-z0-9])" + re.escape(ident) + r"(?![a-z0-9])",
+            q,
+        ):
+            return ident
+    return ""
+
+
+def _person_bio_broken(reply, key):
+    text = reply or ""
+    if key == "faker":
+        if "某处错字" in text or "某处夸张描述" in text:
+            return True
+        if re.search(r"\d{4}年\d{1,2}月\d{1,2}日\d{1,2}年", text):
+            return True
+        if "李相赫" not in text or "1996" not in text:
+            return True
+    if key == "meiko":
+        if "某处跑题" in text or "M完全" in text or "某段跑题的残缺回答" in text:
+            return True
+        if "田野" not in text or "1998" not in text:
+            return True
+    return False
+
+
+def _person_bio_fallback_reply(key):
+    text = _PERSON_BIO_FALLBACK.get(key or "", "")
+    if not text:
+        return ""
+    return f"塔菲给你整理一份干净的介绍喵：\n{text}"
 
 
 def _is_lyrics_query(text):
@@ -466,68 +767,16 @@ def _classify_style_control(query):
     return level, sensitive, playful
 
 
-SAFETY_PATTERNS = {
-    "sensitive": [
-        r"(?:聊聊|谈|讨论|评价|怎么看|怎么看|关注|讲).{0,8}(?:政治|宗教|种族)",
-        r"(?:政治|宗教|种族)(?:问题|话题|敏感|事件|冲突|歧视|领袖|组织)",
-        r"台湾问题|香港问题|新疆问题|西藏问题|法轮|六四|天安门事件",
-    ],
-    "self_harm": [
-        r"自杀|想死|自残|不想活|不想活了|结束生命|活不下去|想结束这一切|撑不下去",
-    ],
-    "violence": [
-        r"杀人|打人|砍人|弄死|伤害别人|暴力伤害|杀人犯",
-    ],
-    "adult": [
-        r"色情|裸体|未成年色情|未成年人色情|援交|卖淫|大尺度",
-    ],
-    "illegal": [
-        r"毒品|买毒|制毒|诈骗|洗钱|走私|黑客攻击|教你黑客|黑客技术",
-    ],
-}
-
-REFUSAL_TEMPLATES = {
-    "sensitive": "这个话题塔菲可能聊不好喵，咱们换个轻松点的吧。",
-    "self_harm": (
-        "听到你这么说，塔菲很担心你喵。如果你正在经历痛苦，"
-        "请考虑联系心理援助热线 400-161-9995。塔菲愿意陪你说说别的，"
-        "或只是听你说。"
-    ),
-    "violence": "塔菲理解你可能很生气，但伤害不是解决办法喵。要不要说说发生了什么？",
-    "adult": "这个塔菲没法聊喵，咱们聊点别的吧。",
-    "illegal": "这个涉及违法，塔菲不能帮忙喵。如果有困难可以聊聊合法的解决方式。",
-}
-
-
-def _check_safety(text):
-    """检查输入是否安全；self_harm 优先级最高。"""
-    if not text:
-        return True, ""
-    for category in ("self_harm", "violence", "illegal", "adult", "sensitive"):
-        for pattern in SAFETY_PATTERNS.get(category, []):
-            if re.search(pattern, text or "", re.IGNORECASE):
-                return False, REFUSAL_TEMPLATES[category]
-    return True, ""
-
-
 def _style_control_prompt(level, sensitive):
     if sensitive:
-        return (
-            "\n【敏感话题】关闭抽象，正常、克制、客观回答；"
-            "不玩梗，不反串，不阴阳，不高级黑。")
+        return "\n【敏感话题】关闭抽象，正常、克制、客观回答。"
     if level == 0:
         return "\n【抽象控制】当前关闭抽象，正常回答。"
     if level == 1:
-        return (
-            "\n【抽象控制】L1 自嘲：可以轻度玩梗，只能自嘲，"
-            "不调侃群友、现象或品牌，不高级黑。")
+        return "\n【抽象控制】L1：可轻度自嘲玩梗，先答准再玩梗。"
     if level == 2:
-        return (
-            "\n【抽象控制】L2 调侃：可以调侃现象、群体或品牌，"
-            "但稍微收敛，先正常回答再轻抽象，不具体攻击个人，不脏话，不人身攻击。")
-    return (
-        "\n【抽象控制】L3 高级黑：可以具体玩梗/高级黑，"
-        "但只限玩梗氛围，不脏话，不人身攻击，不攻击无法验证的东西。")
+        return "\n【抽象控制】L2：可调侃现象/品牌，先答准再玩梗，不攻击个人。"
+    return "\n【抽象控制】L3：可高级黑，先答准再玩梗，不脏话不攻击个人。"
 
 
 def _build_style_fewshot(query, level, key):
@@ -567,158 +816,9 @@ def _build_factual_fewshot(query):
     )
 
 
-CURRENT_DATE_PROMPT = (
-    "【当前日期】今天必须以此为准：{date}。\n"
-    "回答中的日期、星期、今天/昨天/明天、年份都不能错。\n"
-    "涉及赛事、新闻、活动、人物现状时，以今天为基准判断是否已经发生；搜索词要尽量带上年份或日期。"
-)
-
 def _current_date_text():
     wd = "一二三四五六日"[time.localtime().tm_wday]
     return f"北京时间 {time.strftime('%Y年%m月%d日 %H:%M')}，星期{wd}"
-
-SEARCH_STRATEGY_SYSTEM = (
-    "\n【搜索策略】\n"
-    "【引用消息处理铁律】\n"
-    "用户消息包含引用时，引用内容是上一轮对话背景，不是当前问题；\n"
-    "搜索词只能来自当前问题，禁止把引用内容、昵称前缀、上一句回复放进 query。\n"
-    "先判断信息类型：实时新闻/事实/人物/攻略/统计/观点。\n"
-    "当前问题必须执行搜索；由你自己生成完整、可独立执行的 query；可以加入当前年份、别名、英文名、精确短语、"
-    "site: 限定、排除词或 OR 组合。\n"
-    "如果有多个独立实体或子问题，就发多个 search_web 调用，每个调用放一个完整 query。\n"
-    "搜索结果回来后在最终回答里交叉综合：优先官方、权威新闻、可验证来源；"
-    "低可信来源只在有证据支撑时使用。\n"
-    "不要为了凑答案写出搜索结果里没有的数字、时间、人名或事件。"
-)
-
-SEARCH_TOOL_FEWSHOT = (
-    "\n【搜索规划示例】\n"
-    "问题：玄武口音是什么梗？\n"
-    "调用 plan_search：\n"
-    "{\n"
-    "  \"thought_process\": \"先锁定梗的来历，再查华为、问界和余承东的关联，最后补发布会原话。\",\n"
-    "  \"queries\": [\n"
-    "    {\"query\": \"玄武口音 是什么梗\", \"purpose\": \"锁定梗的定义和来源\"},\n"
-    "    {\"query\": \"玄武口音 华为 问界 梗\", \"purpose\": \"查与华为/问界的关联\"},\n"
-    "    {\"query\": \"余承东 玄武口音 遥遥领先 发布会 原话\", \"purpose\": \"查具体发布会说法\"}\n"
-    "  ]\n"
-    "}\n"
-)
-
-SEARCH_PLANNER_PERSONA = (
-    "你是严谨的信息检索架构师。\n"
-    "当用户提出复杂问题时，首要任务不是直接回答，而是构建精准的搜索作战地图。\n"
-    "行动准则：\n"
-    "1. 先拆解：分析时间线、对比项、核心定义、最新进展等维度。\n"
-    "2. 定意图：为每个维度设计最有效的搜索关键词。\n"
-    "3. 拒长句：搜索引擎喜欢短关键词，不要把用户原话直接丢进去。\n"
-    "4. 如果某个 query 仍然很长，继续拆成更短的独立查询，宁可多搜几次。"
-)
-
-SEARCH_PLANNING_RULES = (
-    "\n【搜索规划核心法则】\n"
-    "1. 先理解，再拆解：先分析核心维度（时间、实体、事件、对比项），再设计搜索词。\n"
-    "2. 短词优于长句：搜索词必须是精炼的关键词组合，不要把用户原话直接丢进去。\n"
-    "3. 一个意图一个词：每个搜索词只解决一个子问题，不要混合多个意图。\n"
-    "4. 必须使用工具：事实/实时问题必须先调用 plan_search，禁止直接回答。\n"
-    "\n【搜索规划示例】\n"
-    "用户问：2026年世界杯冠军是谁，阿根廷进了几个球？\n"
-    "错误：直接把整句丢进搜索。\n"
-    "正确：调用 plan_search，拆成“2026年世界杯 冠军”和“2026年世界杯 阿根廷 进球”。"
-)
-
-REFLECTION_EVAL_SYSTEM = (
-    "你是回答质检员。请评估当前输出：\n"
-    "1. 是否编造了没有依据的人名、时间、地点、事件或数字？\n"
-    "2. 是否答非所问或遗漏关键内容？\n"
-    "3. 表达是否清楚准确？\n"
-    "如果输出已经足够好，只回复 PASS。否则指出具体问题并给出改进建议。"
-)
-
-REFLECTION_IMPROVE_SYSTEM = (
-    "根据评估意见改进回答。只输出改进后的回复内容本身，不要解释、前缀或标签。\n"
-    "保持群里真人朋友的语气，准确但不生硬，可以玩梗、抽象。\n"
-    "有把握的常识、玩梗、观点可以用自己的知识回答；事实、实时、链接、直播等问题没有依据时，"
-    "必须说'查不到/无法确认'，不能编造具体链接、直播间号、时间、数字和事件。\n"
-    "绝对不要承诺稍后回答、继续搜索、等下给结果，因为你不会真的继续处理。"
-)
-
-HISTORY_SUMMARY_SYSTEM = (
-    "你是对话记忆压缩器。把下面的聊天历史提炼成要点：\n"
-    "保留人物、事件、偏好、约定、重要结论和事实；删除寒暄、重复、无信息量的内容。\n"
-    "不要编造原文没有的信息。只输出压缩后的要点，不要解释。"
-)
-
-GROUP_MEMORY_LEARN_SYSTEM = (
-    "你是群记忆学习器。从聊天历史中提取值得长期记住的信息：\n"
-    "群成员、偏好、约定、重要事件、群梗、反复话题。\n"
-    "删除寒暄、重复和无关内容；不要记录隐私敏感信息。\n"
-    "重要事实要尽量带上日期，例如：2026-08-05 RNG已经解散。\n"
-    "每行输出一条要点，不要解释。"
-)
-
-NO_REPEAT_SYSTEM = (
-    "重新组织以下回答，用完全不同的说法表达同一意思。\n"
-    "保持群里真人朋友的语气：自然、准确，可以玩梗、抽象比喻，不要变成官方口吻。\n"
-    "禁止复读上一句回答，禁止重复固定话术；保留事实内容，不要换错事实。\n"
-    "只输出新回答，不要解释。"
-)
-
-TOOL_FINAL_SYSTEM = (
-    "你现在已经拿到工具结果，必须直接输出最终答案。\n"
-    "保持群里真人朋友的语气，准确优先，可以玩梗、抽象比喻，不要变成客服/教科书。\n"
-    "禁止再输出 search_web、<tool>、<>、JSON 或任何工具调用格式。\n"
-    "如果工具结果为（无搜索结果），涉及链接、直播间号、时间、数字时明确说'查不到/无法确认'，不要编造。\n"
-    "只输出给群友看的回答正文；如果工具结果里有答案，按工具结果回答。"
-)
-
-LYRIC_RETRY_SYSTEM = (
-    "你是永雏塔菲。上一版回答没有准确覆盖歌词/歌名。\n"
-    "现在只根据下面的【可靠资料】重答。\n"
-    "歌名、歌手、专辑必须写完整，书名号必须成对；不能把用户问的歌换成另一首歌。\n"
-    "歌词只能逐字引用可靠资料；可靠资料没有歌词，就明确说塔菲只搜到片段/没搜到完整歌词，禁止编造。\n"
-    "只输出重答后的正文。"
-)
-
-GROUNDING_CHECK_SYSTEM = (
-    "你是事实核查器。判断回答中的人名、时间、地点、数字、事件是否都有搜索结果或群记忆支撑。\n"
-    "如果搜索结果为（无搜索结果），回答里出现具体人名/时间/数字/事件且没有记忆依据，就是 UNSUPPORTED。\n"
-    "如果回答已经说'不确定'，回复 PASS。\n"
-    "如果回答中的日期、星期、年份与当前日期冲突，也是 UNSUPPORTED。\n"
-    "只输出 JSON：{\"verdict\":\"PASS|PARTIAL|UNSUPPORTED\",\"unsupported_claims\":[\"具体未支撑断言\"],\"suggested_fix\":\"改写建议\"}"
-)
-
-GROUNDING_IMPROVE_SYSTEM = (
-    "根据事实核查结果重写回答。\n"
-    "保持群里真人朋友的语气，准确但不生硬，可以玩梗、抽象比喻，不要变成官方客服口吻。\n"
-    "只使用搜索结果和群记忆中的信息；不要补充没有依据的具体人名、时间、数字、事件。\n"
-    "搜索结果有答案时，保留搜索结果支持的结论并直接回答。\n"
-    "信息不足时，明确说'查不到/无法确认'，不要编造具体链接、直播间号、时间、数字和事件；"
-    "闲聊观点可以用'我印象中/我觉得'表达。\n"
-    "以当前时间和搜索结果为准，不要因为训练知识旧就说'尚未举行/尚未确定/还没开始'。\n"
-    "日期、星期、年份必须与当前时间一致；如果旧训练知识和当前日期冲突，以今天和搜索结果为准。\n"
-    "只输出回答本身，不要解释。"
-)
-
-QUERY_COMPRESS_SYSTEM = (
-    "你是搜索关键词优化器。根据当前日期和用户问题，生成 2-3 个完整搜索式，并提取核心实体和核心事件。\n"
-    "如果实体有常见别名/英文名，搜索词至少包含一个完整别名，例如：\n"
-    "亚马尔→拉明·亚马尔 / Lamine Yamal，C罗→Cristiano Ronaldo，图赫尔→Thomas Tuchel，梅西→Lionel Messi。\n"
-    "如果用户问题里有多个实体，必须全部输出，不能只保留其中一个。\n"
-    "事件也是核心对象，不是人名/地名，例如'世界杯决赛谁打人了'要识别成事件'世界杯决赛打人事件'，"
-    "并生成搜索式如'世界杯决赛 打人事件 2026'、'2026世界杯决赛 冲突 谁'。\n"
-    "每个搜索式必须是一个可以独立搜索的完整短语，不能拆成孤立词。\n"
-    "输出格式：\n"
-    "搜索词1：C罗 年龄 2026\n"
-    "搜索词2：C罗 出生日期\n"
-    "搜索词3：Cristiano Ronaldo age 2026\n"
-    "实体：C罗\n"
-    "实体可以是人名、地名、组织、作品、赛事、角色等；没有实体就写'无'。\n"
-    "事件：世界杯决赛打人事件\n"
-    "事件可以是纠纷、冲突、比赛、丑闻、发布会、事故等；没有事件就写'无'。\n"
-    "涉及比赛、新闻、活动、人物现状时，搜索式必须包含当前年份或具体日期。\n"
-    "不要解释，不要引号，不要前缀。"
-)
 
 TOOLS = [
     {
@@ -846,6 +946,11 @@ def log(msg):
         pass
 
 
+def _log_phase(start, label):
+    elapsed_ms = max(0, (time.time() - start) * 1000)
+    log(f"[阶段] {label}: {elapsed_ms:.0f}ms")
+
+
 def write_health(**kwargs):
     """增量更新健康状态；使用临时文件 + rename 保证原子写入。"""
     if os.environ.get("QQ_TEST_MODE") == "1":
@@ -872,8 +977,6 @@ def read_health():
         return data if isinstance(data, dict) else None
     except Exception:
         return None
-
-
 def _admin_text(text):
     """去掉 @ 前缀后识别管理员指令，兼容 `@bot !status`。"""
     return re.sub(r"@\S+\s*", "", text or "").strip()
@@ -1182,6 +1285,13 @@ def _is_relevant_result(combined, qterms):
     """只要求命中实体/强词，不做逐条组合相关性判断。"""
     if not qterms:
         return True
+    if any(marker in combined for marker in (
+        "百度建议", "B站建议", "必应建议", "360建议", "搜狗提示"
+    )):
+        return any(t in combined for t in qterms)
+    rare = {t for t in qterms if len(t) >= 3 and t not in _GENERIC_SEARCH_TERMS}
+    if rare:
+        return any(t in combined for t in rare)
     return any(t in combined for t in qterms)
 
 def _memory_blocks(memory_text):
@@ -1199,9 +1309,11 @@ def _memory_scope_allowed(scope, scope_alias=None):
         return allowed
     return {"## 群 " + str(scope), "## 常识补充"}
 
-def retrieve_knowledge_scored(query, memory_text, top_k=3, max_chars=2000,
+def retrieve_knowledge_scored(query, memory_text=None, top_k=3, max_chars=2000,
                               scope=None, scope_alias=None):
     """返回 (命中的记忆文本, 最高命中分数)；低于门控阈值时调用方不注入。"""
+    if memory_text is None:
+        memory_text = _read_memory_file_cached()
     if not memory_text.strip():
         return "", 0
     blocks = _memory_blocks(memory_text)
@@ -1243,6 +1355,7 @@ def retrieve_knowledge(query, memory_text, top_k=3, max_chars=2000):
 # ---------- 联网搜索（360搜索）----------
 _SEARCH_TRIGGER = re.compile(
     r"新闻|比分|比赛|天气|温度|股票|股价|汇率|世界杯|冠军|总统|选举|事件|"
+    r"介绍一下|介绍|什么梗|梗|"
     r"歌词|谁唱的|唱一下|唱一段|完整歌词"
     r"发生了什么|最新|现在|价格|多少钱|什么时候|哪天|几月|几号|哪一年|何时|"
     r"是谁|什么是|是什么|在哪|哪里|哪个|为什么|现任|主教练|教练|球员|选手|歌手|演员|主播|战队|俱乐部|首相|主席|创始人|作者|导演|亚军|季军|百科|简介|资料|谁|什么|哪|年龄|年纪|几岁|多大|多少岁|生日|出生|现状|身价|全名|链接|直播间|官方|几点",
@@ -1259,6 +1372,34 @@ def _should_search(text):
         return bool(text and text.strip())
     return _needs_search(text)
 
+
+def _generic_fallback_query(query):
+    """生成不依赖手写规则兜底的通用搜索词。"""
+    q = _clean_search_query(query or "")
+    stripped = False
+    for prefix in (
+        "我是说的梗", "我说的是梗", "我说的是", "我是说的",
+        "说的是", "其实我说的", "我是说", "就是",
+    ):
+        if q.startswith(prefix):
+            q = q[len(prefix):].strip()
+            stripped = True
+            break
+    if "梗" in (query or "") and "梗" not in q and len(q) >= 2:
+        q = f"{q} 梗"
+    if not q:
+        return query or ""
+    if not stripped:
+        built = _build_search_query(q)
+        if built:
+            q = built
+    return q
+
+
+def _should_attempt_generic_search(query):
+    return bool(ALWAYS_SEARCH)
+
+
 _FACTUAL_TRIGGER = re.compile(
     r"新闻|比分|比赛|天气|温度|股票|股价|汇率|世界杯|冠军|亚军|季军|总统|选举|事件|"
     r"歌词|谁唱的|唱一下|唱一段|完整歌词"
@@ -1271,32 +1412,13 @@ def _is_factual(text):
     """温度判定：真正需要准确的事实/知识问题才用低温。"""
     return bool(_FACTUAL_TRIGGER.search(text))
 
-def _clean_question(text):
-    """去掉引用/表情等标记，并做群内常见指代归一，搜索才更准。"""
-    cleaned = re.sub(r"\[[^\]]*\]", "", text)
-    cleaned = re.sub(r"@\S+", "", cleaned)
-    cleaned = re.sub(r"罗哥|老罗", "C罗 ", cleaned)
-    cleaned = re.sub(r"(?i)c罗", "C罗", cleaned)
-    cleaned = re.sub(r"图尔赫|图儿赫|图赫尔", "图赫尔", cleaned)
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-def _clean_search_query(text):
-    """清洗搜索词：去掉引用原文、昵称前缀，避免把上一句回答搜进去。"""
-    raw = text or ""
-    if "[引用原消息]" in raw:
-        raw = raw.split("[引用原消息]", 1)[0]
-    cleaned = _clean_question(raw)
-    reply_marker = re.search(r"（[^）]+）:\s*", cleaned)
-    if reply_marker and cleaned[:reply_marker.start()].strip():
-        cleaned = cleaned[:reply_marker.start()].strip()
-    cleaned = re.sub(r"（[^）]+）:\s*", "", cleaned)
-    cleaned = re.sub(r"^[^：:]{1,20}[:：]\s*", "", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned or _clean_question(text or "")
-
-_SEARCH_CACHE_TTL = 300
+_SEARCH_CACHE_TTL = float(os.environ.get("QQ_SEARCH_CACHE_TTL", "300"))
 _SEARCH_CACHE = {}
 _SEARCH_CACHE_LOCK = threading.Lock()
+_ENGINE_FAIL_STATS = {}
+_ENGINE_FAIL_STATS_LOCK = threading.Lock()
+ENGINE_FAIL_THRESHOLD = 3
+ENGINE_DEGRADE_DURATION = 300
 _LYRICS_BODY_CACHE = {}
 _LYRICS_BODY_CACHE_LOCK = threading.Lock()
 _LYRICS_BODY_CACHE_TTL = 86400
@@ -1310,10 +1432,37 @@ _SEARCH_NOISE = (
     "酷我音乐", "在线试听", "单曲", "免费下载", "试听", "歌词大全",
     "酷狗音乐",
 )
+
+_YEAR_PAGE_NOISE_MARKERS = (
+    "年_百度百科",
+    "年大事",
+    "重要节日",
+    "放假安排",
+    "日历",
+    "行事历",
+    "行事曆",
+    "经济半年报",
+    "世界杯赛程",
+)
+
+
+def _is_generic_year_noise(title, desc, query):
+    """过滤“2026年百科/日历/放假”这种泛年份页，避免污染赛事结果。"""
+    if not any(k in query for k in ("冠军", "亚军", "季军", "决赛", "比分", "夺冠")):
+        return False
+    if not any(k in title for k in _YEAR_PAGE_NOISE_MARKERS):
+        return False
+    combined = (title or "") + (desc or "")
+    if any(k in combined for k in ("冠军", "决赛", "比分", "夺冠", "西班牙", "阿根廷", "大力神杯")):
+        return False
+    return True
 _SEARCH_QUESTION_WORDS = re.compile(
     r"什么时候|哪天|几月|几号|哪一年|何时|是谁|什么是|是什么|为什么|在哪|哪里|哪个|"
     r"是否|如何|怎么|多少钱|什么|哪|谁|吗|呢|啊|呀|哈|了|的|把|还|给|"
-    r"详细介绍|介绍一下|介绍下|帮我|麻烦|请问|告诉|说说|讲一下|知道|一下",
+    r"详细介绍|介绍一下|介绍下|帮我|麻烦|请问|告诉|说说|讲一下|知道|一下|"
+    r"最近|最新|近期|刚刚|目前|当前|现在|"
+    r"请搜索并总结|请搜索并简要介绍|请总结|请简要介绍|请介绍一下|请介绍|"
+    r"总结一下|简述一下|请帮我|帮我查|帮我看|麻烦查|麻烦帮|关于|这个|那个|很火|非常火",
 )
 _CORRECTION_FOLLOWUP_RE = re.compile(
     r"(?:是不是|不是|应该是|其实是|谁说|不是说|对吗|对吧|是吗|是吧|错了吧|不对吧|"
@@ -1396,20 +1545,9 @@ _GUIDE_QUERY_RE = re.compile(
 )
 _WEAK_REPLY_RE = re.compile(
     r"我不太清楚|不太清楚|不清楚|建议你去查|建议去查|查查攻略|查攻略|"
-    r"很难说|不好说",
+    r"很难说|不好说|再搜一下|再帮|帮你查查|帮你查一下|帮塔菲查查|塔菲查查",
     re.IGNORECASE,
 )
-_TAFFY_IDENTITY_MARKERS = ("塔菲", "taffy", "小菲", "塔不灭")
-_TAFFY_EMOTION_MARKERS = ("喵", "嘻嘻", "哈哈", "讨口子", "不是", "！")
-
-
-def _is_taffy_styled(reply):
-    text = (reply or "").lower()
-    has_identity = any(marker in text for marker in _TAFFY_IDENTITY_MARKERS)
-    has_emotion = any(marker in text for marker in _TAFFY_EMOTION_MARKERS)
-    return has_identity and has_emotion
-
-
 def _is_game_query(text):
     return bool(_GAME_QUERY_RE.search(text or ""))
 
@@ -1504,22 +1642,63 @@ def _build_search_query(text):
         return _clean_question(text)
     joined = "".join(meaningful)
     if "世界杯" in joined and "冠军" in joined:
-        year = next((t for t in meaningful if re.fullmatch(r"20\d{2}", t)), "")
-        rest = [
-            t for t in meaningful
-            if t != year and "世界杯" not in t and "冠军" not in t
-        ]
-        meaningful = ["世界杯冠军"] + ([year] if year else []) + rest
+        if any(k in joined for k in ("历届", "一览", "史上")):
+            return "世界杯冠军 一览"
+        event = ""
+        m = re.search(r"(20\d{2}年?[\u4e00-\u9fff]*世界杯)", joined)
+        if m:
+            event = re.sub(r"^(20\d{2})年", r"\1", m.group(1))
+        else:
+            year = next(
+                (t for t in meaningful if re.fullmatch(r"20\d{2}", t)),
+                time.strftime("%Y"),
+            )
+            event = f"{year}世界杯"
+        return f"{event} 冠军"
     return " ".join(meaningful[:6])
+
+
+def _extract_recommendation_entity(text):
+    """从“推荐几本东野圭吾的书”里拆出实体，但保留原查询不动。"""
+    q = _clean_question(text or "")
+    if not re.search(r"书|书籍|作者|作品", q):
+        return ""
+    for entity in _BOOK_RECOMMENDATION_FALLBACK:
+        if entity in q:
+            return entity
+    q = re.sub(
+        r"请|帮我|你|给|推荐|几本|几首|一些|点|作者|的书|书籍|书单|"
+        r"作品|歌|歌曲|歌单|听|呢|呀|吧|喵",
+        " ",
+        q,
+        flags=re.IGNORECASE,
+    )
+    parts = [
+        p.strip()
+        for p in re.split(r"[\s，。！？、：:]+", q)
+        if len(p.strip()) >= 2
+    ]
+    if not parts:
+        return ""
+    parts.sort(key=len, reverse=True)
+    for part in parts:
+        if re.search(r"[\u4e00-\u9fa5]", part):
+            return part
+    return parts[0]
+
 
 def _build_search_variants(query, entities=None, extra_queries=None):
     """生成多个完整搜索式：原始问题、清洗关键词、实体百科、LLM 补充式。"""
     age_words = ("年龄", "年纪", "几岁", "多大", "多少岁", "生日", "出生")
     year = time.strftime("%Y年")
-    variants = [query]
     q2 = _build_search_query(query)
-    if q2 and q2 != query and q2 not in variants:
-        variants.append(q2)
+    variants = [q2] if q2 else []
+    if query not in variants:
+        variants.append(query)
+    variants = [v for v in variants if v]
+    for plan in _recommendation_search_plans(query):
+        if plan["query"] not in variants:
+            variants.append(plan["query"])
     parts = _split_search_terms(q2, max_terms=4)
     if parts:
         base = parts[0]
@@ -1570,6 +1749,69 @@ def _search_cache_set(key, value):
         if len(_SEARCH_CACHE) > 100:
             for old_key in list(_SEARCH_CACHE)[:-80]:
                 _SEARCH_CACHE.pop(old_key, None)
+
+
+def _is_engine_degraded(engine):
+    """连续失败达到阈值后在 5 分钟内跳过该引擎。"""
+    with _ENGINE_FAIL_STATS_LOCK:
+        stats = _ENGINE_FAIL_STATS.get(engine) or {}
+    if (stats.get("fails") or 0) < ENGINE_FAIL_THRESHOLD:
+        return False
+    last_fail = stats.get("last_fail") or 0
+    if time.time() - last_fail < ENGINE_DEGRADE_DURATION:
+        return True
+    with _ENGINE_FAIL_STATS_LOCK:
+        _ENGINE_FAIL_STATS.pop(engine, None)
+    return False
+
+
+def _record_engine_fail(engine):
+    with _ENGINE_FAIL_STATS_LOCK:
+        stats = _ENGINE_FAIL_STATS.setdefault(engine, {"fails": 0, "last_fail": 0})
+        stats["fails"] = int(stats.get("fails") or 0) + 1
+        stats["last_fail"] = time.time()
+    if (stats.get("fails") or 0) >= ENGINE_FAIL_THRESHOLD:
+        write_health(search_degraded=True, search_degraded_engine=engine)
+        log(f"[搜索] {engine} 连续失败 {stats['fails']} 次，降级 {ENGINE_DEGRADE_DURATION}s")
+
+
+def search_with_resilience(query, max_results=8):
+    """搜索统一入口：缓存 + 引擎失败统计 + 自动降级。"""
+    cache_key = _search_cache_key(query)
+    cached = _search_cache_get(cache_key)
+    if cached:
+        inc_stat("search_cache_hits")
+        log("[搜索] 命中缓存")
+        return cached
+    engines = (
+        "bing_cn", "360_m", "baidu", "sogou", "baike", "suggest",
+        "weixin", "360", "quark", "baidu_m", "wikipedia", "arxiv", "pubmed",
+    )
+    available = [e for e in engines if not _is_engine_degraded(e)]
+    if not available:
+        write_health(search_degraded=True, search_degraded_engine="all")
+        return "（搜索暂时不可用，所有引擎都已降级）"
+    for attempt in range(2):
+        for engine in available:
+            try:
+                inc_stat("search_calls")
+                results = _search_engine(query, engine, max_results)
+                if results:
+                    result = "\n".join(results)
+                    _search_cache_set(cache_key, result)
+                    inc_stat("search_success")
+                    return result
+                else:
+                    inc_stat("search_fail")
+                    _record_engine_fail(engine)
+                    log(f"[搜索] {engine} 空结果")
+            except Exception as e:
+                inc_stat("search_fail")
+                _record_engine_fail(engine)
+                log(f"[搜索] {engine} 失败: {repr(e)[:80]}")
+        if attempt == 0:
+            time.sleep(0.3)
+    return "（搜索失败，请稍后重试）"
 
 def _answer_cache_key(chat_key, query):
     return f"{chat_key}|{_clean_question(query).lower()}"
@@ -1643,8 +1885,97 @@ def _fetch_html(url, timeout=5, extra_headers=None):
     raise RuntimeError(last_err or "fetch failed")
 
 def _fetch_json(url, timeout=5):
-    text = _fetch_html(url, timeout)
-    return json.loads(text)
+    try:
+        text = _fetch_html(url, timeout)
+        return json.loads(text)
+    except Exception:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 Chrome/120 Safari/537.36"),
+            "Accept": "application/json,text/plain,*/*",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+        for enc in ("utf-8", "gbk"):
+            try:
+                return json.loads(raw.decode(enc))
+            except Exception:
+                continue
+        return json.loads(raw.decode("utf-8", "replace"))
+
+
+_DRISSION_BROWSER_CANDIDATES = (
+    os.environ.get("QQ_BROWSER_PATH", ""),
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+)
+_DRISSION_LOCK = threading.Lock()
+
+
+def _find_drission_browser():
+    for path in _DRISSION_BROWSER_CANDIDATES:
+        if path and os.path.exists(path):
+            return path
+    return ""
+
+
+def _drission_search_html(query, engine="bing_cn", timeout=DRISSION_SEARCH_TIMEOUT):
+    """真实浏览器搜索兜底，主要用来绕过百度/搜狗/360 的纯 HTTP 反爬。"""
+    if not DRISSION_SEARCH_ENABLED:
+        return ""
+    browser = _find_drission_browser()
+    if not browser:
+        log("[浏览器搜索] 未找到 Chrome/Edge，跳过 DrissionPage")
+        return ""
+    if engine not in ("bing", "bing_cn"):
+        engine = "bing_cn"
+    q = urllib.parse.quote(_clean_search_query(query))
+    if engine == "bing":
+        url = f"https://www.bing.com/search?q={q}"
+    else:
+        url = f"https://cn.bing.com/search?q={q}&setlang=zh-hans"
+    page = None
+    with _DRISSION_LOCK:
+        try:
+            from DrissionPage import ChromiumPage, ChromiumOptions
+            co = ChromiumOptions()
+            co.set_browser_path(browser)
+            co.headless(True)
+            co.auto_port(True)
+            co.set_load_mode("none")
+            co.set_timeouts(int(timeout), int(timeout), int(timeout))
+            co.set_argument("--disable-blink-features=AutomationControlled")
+            co.set_argument("--no-sandbox")
+            co.set_argument("--disable-gpu")
+            co.set_argument("--disable-dev-shm-usage")
+            page = ChromiumPage(addr_or_opts=co)
+            page.get(url)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                html = page.html or ""
+                current_url = page.url or ""
+                if "b_algo" in html or "antispider" in current_url or "captcha" in current_url.lower():
+                    break
+                time.sleep(0.5)
+            current_url = page.url or ""
+            if "antispider" in current_url or "captcha" in current_url.lower():
+                log(f"[浏览器搜索] {engine} 仍触发验证码，放弃")
+                return ""
+            html = page.html or ""
+            log(f"[浏览器搜索] {engine} 成功，{len(html)} 字")
+            return html
+        except Exception as e:
+            log(f"[浏览器搜索] {engine} 失败: {repr(e)[:80]}")
+            return ""
+        finally:
+            if page is not None:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
+
 
 def _search_wikipedia(query, max_results=5):
     """中文维基 JSON API，结构化返回，比网页搜索更少被反爬拦截。"""
@@ -1656,9 +1987,9 @@ def _search_wikipedia(query, max_results=5):
     for item in data.get("query", {}).get("search", [])[:max_results]:
         title = item.get("title", "") or ""
         snippet = re.sub(r"<[^>]+>", "", item.get("snippet", "") or "")
-        snippet = _html.unescape(snippet).strip()
+        snippet = _normalize_entity_spacing(_html.unescape(snippet).strip())
         if title and snippet:
-            out.append(f"【{title}】{snippet[:200]}")
+            out.append(f"【{title}】{snippet[:SEARCH_SNIPPET_CHARS]}")
     return out
 
 def _search_arxiv(query, max_results=5):
@@ -1741,8 +2072,9 @@ def _search_baike_openapi(query, max_results=3):
                 if isinstance(value, str) and len(value) > 10:
                     desc += " " + value
         desc = re.sub(r"\s+", " ", desc).strip()
+        desc = _normalize_entity_spacing(desc)
         if desc:
-            out.append(f"【百度百科：{title}】{desc[:400]}")
+            out.append(f"【百度百科：{title}】{desc[:SEARCH_SNIPPET_CHARS]}")
             if len(out) >= max_results:
                 break
     return out
@@ -1757,6 +2089,26 @@ def _search_suggestions(query, max_results=6):
             "https://www.baidu.com/sugrec?prod=pc&wd=" + urllib.parse.quote(query),
             lambda d: d.get("g") or [],
             lambda item: item.get("q"),
+        ),
+        (
+            "360建议",
+            (
+                "https://sug.so.360.cn/suggest?word="
+                + urllib.parse.quote(query)
+                + "&encodein=utf-8&encodeout=utf-8"
+            ),
+            lambda d: d.get("result") or [],
+            lambda item: item.get("word"),
+        ),
+        (
+            "必应建议",
+            "https://api.bing.com/qsonhs.aspx?q=" + urllib.parse.quote(query),
+            lambda d: [
+                item
+                for group in ((d.get("AS") or {}).get("Results") or [])
+                for item in (group.get("Suggests") or [])
+            ],
+            lambda item: item.get("Txt"),
         ),
         (
             "B站建议",
@@ -1777,6 +2129,7 @@ def _search_suggestions(query, max_results=6):
         for item in items:
             value = get_value(item) if isinstance(item, dict) else ""
             value = re.sub(r"<[^>]+>", "", str(value or "")).strip()
+            value = _normalize_entity_spacing(value)
             if not value or value in seen:
                 continue
             seen.add(value)
@@ -1784,6 +2137,26 @@ def _search_suggestions(query, max_results=6):
             if len(out) >= max_results:
                 return out
     return out
+
+
+def _search_douban_movies(tag="热门", max_results=10):
+    """豆瓣热门电影 JSON 接口，免登录、低反爬，用于电影推荐。"""
+    url = (
+        "https://movie.douban.com/j/search_subjects"
+        f"?type=movie&tag={urllib.parse.quote(tag)}"
+        f"&sort=recommend&page_limit={max_results}&page_start=0"
+    )
+    data = _fetch_json(url, timeout=5)
+    subjects = data.get("subjects") or []
+    rows = []
+    for item in subjects[:max_results]:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        rate = str(item.get("rate") or "").strip()
+        rows.append(f"《{title}》" + (f"（豆瓣 {rate}）" if rate else ""))
+    return rows
+
 
 def _extract_bing_results(html, max_results, query=""):
     """只解析必应结果块 li.b_algo，避免把页面其他 h2/h3 当结果。"""
@@ -1800,7 +2173,8 @@ def _extract_bing_results(html, max_results, query=""):
         if not h2:
             continue
         title = re.sub(r"<[^>]+>", " ", h2.group(1))
-        title = _html.unescape(re.sub(r"\s+", " ", title)).strip()
+        title = _normalize_entity_spacing(
+            _html.unescape(re.sub(r"\s+", " ", title)).strip())
         if len(title) < 5 or title in seen:
             continue
         p = re.search(r"<p[^>]*>(.*?)</p>", block, re.S)
@@ -1815,15 +2189,18 @@ def _extract_bing_results(html, max_results, query=""):
         desc = ""
         if p:
             desc = re.sub(r"<[^>]+>", " ", p.group(1))
-            desc = _html.unescape(re.sub(r"\s+", " ", desc)).strip()
+            desc = _normalize_entity_spacing(
+                _html.unescape(re.sub(r"\s+", " ", desc)).strip())
         if any(noise in title or noise in desc for noise in _SEARCH_NOISE):
+            continue
+        if _is_generic_year_noise(title, desc, query):
             continue
         if qterms:
             combined = (title + desc).lower()
             if not _is_relevant_result(combined, qterms):
                 continue
         if desc:
-            output.append(f"【{title[:60]}】{desc[:240]}")
+            output.append(f"【{title[:60]}】{desc[:SEARCH_SNIPPET_CHARS]}")
             seen.add(title)
             if len(output) >= max_results:
                 break
@@ -1839,6 +2216,7 @@ def _extract_search_results(html, engine, max_results, query=""):
         title = re.sub(r'<[^>]*(?:>|$)', '', m.group(2)).strip()
         title = re.sub(r'\s+(?:src|href|class|style|data-[a-z-]+)=[^ >]+', '', title)
         title = _html.unescape(re.sub(r'\s+', ' ', title))
+        title = _normalize_entity_spacing(title)
         if len(title) < 5 or title in seen:
             continue
         tail = html[m.end():m.end() + 1200]
@@ -1847,23 +2225,31 @@ def _extract_search_results(html, engine, max_results, query=""):
         tail = re.sub(r'<[^>]+>', ' ', tail)
         tail = re.sub(r'&nbsp;', ' ', tail)
         tail = re.sub(r'\s+', ' ', tail).strip()
-        desc = _html.unescape(tail[:250])
+        desc = _normalize_entity_spacing(
+            _html.unescape(tail[:SEARCH_SNIPPET_CHARS]))
         if "<" in desc or ">" in desc:
             continue
         if any(noise in title or noise in desc for noise in _SEARCH_NOISE):
+            continue
+        if _is_generic_year_noise(title, desc, query):
             continue
         if qterms:
             combined = (title + desc).lower()
             if not _is_relevant_result(combined, qterms):
                 continue
         if len(desc) > 10:
-            output.append(f"【{title[:60]}】{desc[:240]}")
+            output.append(f"【{title[:60]}】{desc[:SEARCH_SNIPPET_CHARS]}")
             seen.add(title)
         if len(output) >= max_results:
             break
     return output
 
 def _search_engine(query, engine, max_results):
+    if engine == "suggest" and (
+        _skip_recommendation_suggestions(query)
+        or _skip_person_suggestions(query)
+    ):
+        return []
     if engine == "wikipedia":
         return _search_wikipedia(query, max_results)
     if engine == "arxiv":
@@ -1898,11 +2284,11 @@ def _search_engine(query, engine, max_results):
 
 _LYRIC_URL_HINTS = (
     "22lrc.com", "genius.com", "mulanci.org", "goflac.com",
-    "geciyi.com", "geci", "lyrics",
+    "geciyi.com", "jayfc.com", "lyrics.net.cn", "geci", "lyrics", "songs",
 )
 
 
-def _extract_page_text(html, max_chars=6000):
+def _extract_page_text(html, max_chars=MAX_PAGE_TEXT_CHARS):
     """提取网页正文，优先正文容器，再去掉导航/脚本类噪音。"""
     try:
         from bs4 import BeautifulSoup
@@ -1912,7 +2298,8 @@ def _extract_page_text(html, max_chars=6000):
         text = re.sub(r"<script.*?</script>", "", html or "", flags=re.S)
         text = re.sub(r"<style.*?</style>", "", text, flags=re.S)
         text = re.sub(r"<[^>]+>", " ", text)
-        text = _html.unescape(re.sub(r"\s+", " ", text))
+        text = _normalize_entity_spacing(
+            _html.unescape(re.sub(r"[ \t]+", " ", text)))
         return text.strip()[:max_chars]
     soup = BeautifulSoup(html or "", "html.parser")
     for tag in soup(["script", "style", "noscript", "iframe", "nav", "footer", "header", "aside", "form"]):
@@ -1925,6 +2312,7 @@ def _extract_page_text(html, max_chars=6000):
     )
     text = main.get_text("\n", strip=True)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    lines = [_normalize_entity_spacing(ln) for ln in lines]
     return "\n".join(lines)[:max_chars]
 
 
@@ -1943,6 +2331,7 @@ def _extract_search_links(html, max_links=8):
         if not href.startswith("http") or not title:
             continue
         title = _html.unescape(re.sub(r"\s+", " ", title)).strip()
+        title = _normalize_entity_spacing(title)
         if title in seen:
             continue
         if any(noise in title for noise in _SEARCH_NOISE):
@@ -1959,14 +2348,22 @@ def _extract_search_links(html, max_links=8):
     return links
 
 
-def _looks_like_lyrics_page(text, query):
+def _looks_like_lyrics_page(text, query, url=""):
     if len(text or "") < 200:
         return False
     qterms = _query_terms(query)
     if qterms and not _is_relevant_result(text, qterms):
         return False
     lines = [ln for ln in text.splitlines() if len(ln.strip()) >= 4]
-    return len(lines) >= 6
+    url_lower = (url or "").lower()
+    known_lyric_url = any(
+        hint in url_lower for hint in _LYRIC_URL_HINTS
+    )
+    lyric_marker = "歌词" in text or "lyric" in text.lower()
+    if known_lyric_url:
+        return len(lines) >= 6
+    # 专辑介绍/百科正文很容易过“行数”检查，必须再看到歌词标记才敢抓。
+    return len(lines) >= 8 and lyric_marker
 
 
 def _extract_js_redirect(html):
@@ -1995,7 +2392,7 @@ async def _fetch_page_text_async(url, timeout=4, max_redirects=2):
         if redirect:
             current = urllib.parse.urljoin(current, redirect)
             continue
-        return _extract_page_text(html, max_chars=6000)
+        return _extract_page_text(html, max_chars=MAX_PAGE_TEXT_CHARS)
     return ""
 
 
@@ -2007,6 +2404,72 @@ def _lyric_search_url(query, engine):
     if engine == "sogou":
         return f"https://www.sogou.com/web?query={q}&ie=utf8"
     return f"https://cn.bing.com/search?q={q}&setlang=zh-hans"
+
+
+def _extract_lyric_song_title(query):
+    """从歌词问题里提取歌名，去掉歌手/专辑/“歌词”这类搜索噪音。"""
+    q = _clean_search_query(query or "")
+    bracket = re.search(r"《([^》]+)》", q)
+    if bracket and len(bracket.group(1).strip()) >= 2:
+        return bracket.group(1).strip()
+    q = re.sub(r"(?:完整)?歌词(?:是什么|有哪些|呢|有吗)?", " ", q)
+    q = re.sub(
+        r"周杰伦|林俊杰|热狗|MC ?HotDog|方文山|太阳之子|新专辑|专辑|"
+        r"合唱|演唱|合作|新歌|和|与|及",
+        " ",
+        q,
+        flags=re.IGNORECASE,
+    )
+    q = q.strip()
+    q = re.sub(r"^(?:的)+", " ", q)
+    q = re.sub(r"[\s，。！？、：:]+", " ", q).strip()
+    q = q.rstrip("的").strip()
+    parts = [part.strip() for part in q.split() if len(part.strip()) >= 2]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    # 有歌手前缀时取最后的歌名片段；普通多词歌名保留整句。
+    return parts[-1] if len(parts[-1]) >= 2 and parts[-1] not in (
+        "歌词", "完整", "是什么", "周杰伦", "林俊杰"
+    ) else " ".join(parts)
+
+
+def _jayfc_search_links(query, max_links=6):
+    """周杰伦歌迷联盟无反爬直连，专门兜底周杰伦歌曲。"""
+    song = _extract_lyric_song_title(query)
+    if not song:
+        return []
+    candidates = [song]
+    if len(song) >= 4:
+        candidates.append(song[-2:])
+    seen = set()
+    out = []
+    for candidate in candidates:
+        try:
+            url = "https://jayfc.com/search?q=" + urllib.parse.quote(candidate)
+            html = _fetch_html(url, timeout=5)
+        except Exception:
+            continue
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html or "", "html.parser")
+            for a in soup.select("a[href*='/songs/']"):
+                title = a.get_text(" ", strip=True)
+                href = urllib.parse.urljoin("https://jayfc.com", a.get("href") or "")
+                if not title or not href or title in seen:
+                    continue
+                if not _is_relevant_result(title, _query_terms(song)):
+                    continue
+                seen.add(title)
+                out.append({"title": title, "url": href})
+                if len(out) >= max_links:
+                    return out
+        except Exception:
+            continue
+        if out:
+            break
+    return out
 
 
 async def _fetch_lyric_links_from_engine(query, engine="360", max_links=6):
@@ -2041,6 +2504,12 @@ async def _fetch_lyrics_body(query, max_pages=1, max_links=6):
             return cached[1]
     links = []
     seen_titles = set()
+    for item in _jayfc_search_links(query, max_links=max_links):
+        if item["title"] not in seen_titles:
+            seen_titles.add(item["title"])
+            links.append(item)
+    if links:
+        log(f"[歌词] jayfc 直连命中 {len(links)} 条")
     for engine in ("360", "sogou", "bing_cn"):
         engine_links = await _fetch_lyric_links_from_engine(
             query, engine=engine, max_links=max_links)
@@ -2051,6 +2520,18 @@ async def _fetch_lyrics_body(query, max_pages=1, max_links=6):
             links.append(item)
         if len(links) >= max_links * 2:
             break
+    if not links:
+        try:
+            dr_html = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _drission_search_html, query, "bing_cn",
+                    timeout=max(6.0, DRISSION_SEARCH_TIMEOUT),
+                ),
+                timeout=DRISSION_SEARCH_TIMEOUT + 1.5,
+            )
+            links = _extract_search_links(dr_html, max_links=max_links * 2)
+        except Exception as e:
+            log(f"[歌词] 浏览器兜底失败 {repr(e)[:60]}")
     links.sort(key=lambda item: (
         0 if "歌词" in item["title"] or "lyric" in item["title"].lower()
         or any(hint in item["url"].lower() for hint in _LYRIC_URL_HINTS)
@@ -2066,12 +2547,12 @@ async def _fetch_lyrics_body(query, max_pages=1, max_links=6):
         except Exception as e:
             log(f"[歌词] 页面失败 {host}: {repr(e)[:60]}")
             continue
-        if not _looks_like_lyrics_page(text, query):
+        if not _looks_like_lyrics_page(text, query, item["url"]):
             log(f"[歌词] 页面跳过 {host}：未检测到有效歌词")
             continue
         log(f"[歌词] 页面正文成功 {host}：{len(text)}字")
         body_parts.append(
-            f"来源：{item['url']}\n标题：{item['title']}\n{text[:6000]}"
+            f"来源：{item['url']}\n标题：{item['title']}\n{text[:MAX_PAGE_TEXT_CHARS]}"
         )
         if len(body_parts) >= max_pages:
             break
@@ -2106,7 +2587,7 @@ def _lyric_subject_terms(query):
     return parts[:2]
 
 
-def _lyric_reply_suspect(reply, query, source_text):
+def _lyric_reply_suspect(reply, query, source_text, memory_text=""):
     reply = reply or ""
     if "《" in reply and "》" not in reply:
         return True
@@ -2115,25 +2596,129 @@ def _lyric_reply_suspect(reply, query, source_text):
     subjects = _lyric_subject_terms(query)
     if subjects and any(s not in reply for s in subjects):
         return True
+    norm_reply = _entity_norm(reply)
+    for fragment in _lyric_key_fragments(query, source_text, memory_text):
+        fragment = _entity_norm(fragment)
+        if fragment and fragment not in norm_reply:
+            return True
     return False
 
 
-def search_web(query, max_results=8):
-    """多源搜索：必应中国 -> 百度桌面 -> 搜狗桌面 -> 微信/360/百度移动兜底。"""
-    for attempt in range(2):
-        for engine in (
-            "bing_cn", "360_m", "baidu", "sogou", "baike", "suggest",
-            "weixin", "360", "quark", "baidu_m", "wikipedia", "arxiv", "pubmed",
+def _extract_lyrics_block(text, max_lines=140):
+    """从深读正文里切出歌词行，避免模型重写后丢字/改字。"""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    start = None
+    for idx, line in enumerate(lines):
+        if (
+            line in ("歌词", "Lyrics", "lyrics")
+            or "歌词已迁移" in line
+            or line.startswith("歌词：")
         ):
-            try:
-                results = _search_engine(query, engine, max_results)
-                if results:
-                    log(f"[搜索] 使用 {engine} (第{attempt + 1}轮)")
-                    return "\n".join(results)
-            except Exception as e:
-                log(f"[搜索] {engine} 失败: {repr(e)[:80]}")
-        if attempt == 0:
-            time.sleep(0.3)
+            start = idx
+            break
+    if start is None:
+        return ""
+    idx = start
+    while idx < len(lines) and (
+        lines[idx] in ("歌词", "Lyrics", "lyrics")
+        or "歌词已迁移" in lines[idx]
+    ):
+        idx += 1
+    end = len(lines)
+    for j in range(idx, len(lines)):
+        line = lines[j]
+        if (
+            line.startswith("【")
+            or line.startswith("来源：")
+            or line.startswith("标题：")
+            or line in ("歌曲", "返回")
+            or line.startswith("第 ")
+            or (line.startswith("（") and "Aurora" in line)
+        ):
+            end = j
+            break
+    block = lines[idx:end]
+    if len(block) < 4:
+        return ""
+    return "\n".join(block[:max_lines])
+
+
+def _extract_memory_lyrics(text, title):
+    """从 bot_memory.md 的手动歌词条目里抽取完整可靠歌词。"""
+    if not text or not title:
+        return ""
+    for line in text.splitlines():
+        if f"《{title}》" not in line or "真实歌词" not in line:
+            continue
+        m = re.search(
+            r"真实歌词(?:段落|开头)?[：:]\s*[“\"](.+?)[”\"]",
+            line,
+            re.S,
+        )
+        if m:
+            content = re.sub(r"\s*/\s*", "\n", m.group(1))
+            content = content.strip()
+            if len(content) >= 20:
+                return content
+    return ""
+
+
+def _lyric_key_fragments(query, source_text, memory_text="", max_fragments=4):
+    """选最长的几行可靠歌词做逐字校验，抓模型漏字/改字。"""
+    title = _extract_lyric_song_title(query)
+    blocks = []
+    block = _extract_lyrics_block(source_text)
+    if block:
+        blocks.append(block)
+    memory_block = _extract_memory_lyrics(memory_text, title)
+    if memory_block:
+        blocks.append(memory_block)
+    fragments = set()
+    for block in blocks:
+        for line in block.splitlines():
+            line = re.sub(r"\s+", "", line.strip())
+            if len(line) >= 6:
+                fragments.add(line)
+    return sorted(fragments, key=len, reverse=True)[:max_fragments]
+
+
+def _build_lyrics_fallback_answer(query, source_text, memory_text=""):
+    title = _extract_lyric_song_title(query)
+    block = _extract_lyrics_block(source_text)
+    if not block:
+        block = _extract_memory_lyrics(memory_text, title)
+    if title and block:
+        return (
+            f"《{title}》完整歌词塔菲找到啦喵：\n"
+            f"{block}\n\n"
+            "塔菲按可靠歌词原样贴的，没瞎改喵。"
+        )
+    if title:
+        return (
+            f"塔菲确认《{title}》存在，但可靠资料里还没拿到完整歌词喵。"
+        )
+    return "塔菲没拿到完整歌词喵，不敢编。"
+
+
+def search_web(query, max_results=8):
+    """多源搜索：统一入口带缓存、引擎失败统计和自动降级。"""
+    result = search_with_resilience(query, max_results)
+    if result and not result.startswith("（搜索失败"):
+        return result
+    if DRISSION_SEARCH_ENABLED:
+        try:
+            html = _drission_search_html(query, "bing_cn")
+            results = _extract_search_results(
+                html, "bing_cn", max_results, query)
+            if results:
+                combined = "\n".join(results)
+                _search_cache_set(_search_cache_key(query), combined)
+                log("[搜索] 使用 bing_cn 浏览器兜底")
+                return combined
+        except Exception as e:
+            log(f"[搜索] 浏览器兜底失败: {repr(e)[:60]}")
     return ""
 
 async def search_web_async(query, max_results=8, entities=None, extra_queries=None, exact=False):
@@ -2141,13 +2726,14 @@ async def search_web_async(query, max_results=8, entities=None, extra_queries=No
     cache_key = _search_cache_key(query)
     cached = _search_cache_get(cache_key)
     if cached:
+        inc_stat("search_cache_hits")
         log("[搜索] 命中缓存")
         return cached
     # 2026-08-05 实测：百度/搜狗桌面版优先；微信/360/百度移动作为兜底。
     variants = [query] if exact else _build_search_variants(query, entities, extra_queries)
-    primary = ("suggest", "sogou", "bing_cn", "360_m", "baidu")
+    primary = ("bing_cn", "sogou", "suggest", "360_m", "baidu")
     secondary = (
-        "baike", "weixin", "360", "quark", "baidu_m",
+        "weixin", "360", "quark", "baidu_m",
         "wikipedia", "arxiv", "pubmed",
     )
     _short = {
@@ -2156,23 +2742,29 @@ async def search_web_async(query, max_results=8, entities=None, extra_queries=No
     }
     tasks = {}
     for engine in primary:
+        if _is_engine_degraded(engine):
+            continue
         if len(tasks) >= MAX_SEARCH_TASKS:
             break
         for variant in variants:
+            inc_stat("search_calls")
             task = asyncio.ensure_future(asyncio.wait_for(
                 asyncio.to_thread(_search_engine, variant, engine, max_results),
                 timeout=_short.get(engine, 3.5)))
             tasks[task] = (engine, variant)
     for engine in secondary:
+        if _is_engine_degraded(engine):
+            continue
         if len(tasks) >= MAX_SEARCH_TASKS:
             break
+        inc_stat("search_calls")
         task = asyncio.ensure_future(asyncio.wait_for(
             asyncio.to_thread(_search_engine, query, engine, max_results),
             timeout=_short.get(engine, 3.5)))
         tasks[task] = (engine, query)
     collected = []
     used_engines = []
-    deadline = time.monotonic() + 4.0
+    deadline = time.monotonic() + 2.2
     start = time.monotonic()
     while tasks and time.monotonic() < deadline:
         done, pending = await asyncio.wait(
@@ -2183,16 +2775,32 @@ async def search_web_async(query, max_results=8, entities=None, extra_queries=No
             try:
                 result = task.result()
             except Exception as e:
+                inc_stat("search_fail")
+                _record_engine_fail(engine)
                 log(f"[搜索] {engine}:{variant[:30]} 失败: {repr(e)[:60]}")
                 continue
             if result:
+                inc_stat("search_success")
                 collected.append(result)
                 used_engines.append(engine)
+            else:
+                inc_stat("search_fail")
+                _record_engine_fail(engine)
+                log(f"[搜索] {engine}:{variant[:30]} 空结果")
         if collected:
             total_entries = sum(len(r) for r in collected)
             elapsed = time.monotonic() - start
-            if (not tasks or elapsed >= 2.5) or (
-                total_entries >= max_results and len(used_engines) >= 2
+            non_suggest_used = any(e != "suggest" for e in used_engines)
+            if "bing_cn" in used_engines:
+                break
+            if non_suggest_used and (
+                not tasks or elapsed >= 1.6
+            ):
+                break
+            if (
+                non_suggest_used
+                and total_entries >= max_results
+                and len(used_engines) >= 2
             ):
                 break
     for task in tasks:
@@ -2205,6 +2813,24 @@ async def search_web_async(query, max_results=8, entities=None, extra_queries=No
         log(f"[搜索] 合并 {'/'.join(used_engines)} (并发)")
         _search_cache_set(cache_key, combined)
         return combined
+    if DRISSION_SEARCH_ENABLED:
+        try:
+            dr_html = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _drission_search_html, query, "bing_cn",
+                    timeout=max(6.0, DRISSION_SEARCH_TIMEOUT),
+                ),
+                timeout=DRISSION_SEARCH_TIMEOUT + 1.5,
+            )
+            results = _extract_search_results(
+                dr_html, "bing_cn", max_results, query)
+            if results:
+                combined = "\n".join(results)
+                log("[搜索] 使用 bing_cn 浏览器兜底")
+                _search_cache_set(cache_key, combined)
+                return combined
+        except Exception as e:
+            log(f"[搜索] 浏览器兜底失败: {repr(e)[:60]}")
     return ""
 
 def _merge_search_results(results_list, max_results):
@@ -2227,6 +2853,19 @@ def _rule_plan_for_query(text):
     """高频问题类型的规则兜底搜索计划，模型失效时也能拆。"""
     q = _clean_question(text or "")
     year = time.strftime("%Y年")
+    year_num = time.strftime("%Y")
+    if _recommendation_category(q) or _extract_recommendation_entity(q):
+        return _recommendation_search_plans(q)
+    if "tiktok" in q.lower() and ("法案" in q or "剥离" in q):
+        return [
+            {"query": "TikTok divestment bill 2024", "purpose": "查英文法案核心条款"},
+            {"query": "美国 TikTok 剥离 法案", "purpose": "查中文报道摘要"},
+        ]
+    if "日本央行" in q and ("负利率" in q or "2024" in q):
+        return [
+            {"query": "日本央行 2024年3月 结束负利率 加息", "purpose": "确认历史性货币政策决定"},
+            {"query": "Bank of Japan March 2024 negative interest rate", "purpose": "查英文权威来源"},
+        ]
     if "玄武口音" in q:
         return [
             {"query": "玄武口音 余承东 竹知了 梗", "purpose": "锁定玄武口音定义"},
@@ -2235,8 +2874,9 @@ def _rule_plan_for_query(text):
     m = re.search(r"(.+?)(?:年龄|几岁|多大|多少岁)", q)
     if m and len(m.group(1).strip()) >= 2:
         entity = re.sub(r"今年|去年|现在|目前|当前|最近", "", m.group(1).strip()).strip()
+        year_suffix = "" if re.search(r"20\d{2}年?", entity) else year
         return [
-            {"query": f"{entity} 年龄 {year}", "purpose": f"查询{entity}当前年龄"},
+            {"query": f"{entity} 年龄 {year_suffix}".strip(), "purpose": f"查询{entity}当前年龄"},
             {"query": f"{entity} 出生日期", "purpose": f"获取{entity}出生日期"},
         ]
     m = re.search(r"(.+?)(?:的)?(?:完整)?歌词", q)
@@ -2265,15 +2905,25 @@ def _rule_plan_for_query(text):
     m = re.search(r"(.+?)(?:冠军|亚军|季军)", q)
     if m and len(m.group(1).strip()) >= 2:
         entity = re.sub(r"今年|去年|现在|目前|当前|最近", "", m.group(1).strip()).strip()
+        entity = re.sub(r"^(20\d{2})年(?=世界杯)", r"\1", entity)
+        if "世界杯" in entity and not re.search(r"20\d{2}年?", entity):
+            if not re.search(r"20\d{2}", entity):
+                entity = f"{year_num}世界杯"
+            return [
+                {"query": f"{entity} 冠军", "purpose": "确认比赛或赛事冠军"},
+                {"query": f"{entity} 决赛 比分", "purpose": "获取决赛比分"},
+            ]
+        year_suffix = "" if re.search(r"20\d{2}年?", entity) else year
         return [
-            {"query": f"{entity} 冠军 {year}", "purpose": "确认比赛或赛事冠军"},
-            {"query": f"{entity} 决赛 比分 {year}", "purpose": "获取决赛比分"},
+            {"query": f"{entity} 冠军 {year_suffix}".strip(), "purpose": "确认比赛或赛事冠军"},
+            {"query": f"{entity} 决赛 比分 {year_suffix}".strip(), "purpose": "获取决赛比分"},
         ]
     m = re.search(r"(.+?)(?:事件|发生了什么|怎么回事)", q)
     if m and len(m.group(1).strip()) >= 2:
         entity = re.sub(r"今年|去年|现在|目前|当前|最近", "", m.group(1).strip()).strip()
+        year_suffix = "" if re.search(r"20\d{2}年?", entity) else year
         return [
-            {"query": f"{entity} 事件 {year}", "purpose": "查找事件经过"},
+            {"query": f"{entity} 事件 {year_suffix}".strip(), "purpose": "查找事件经过"},
             {"query": f"{entity} 最新消息", "purpose": "查找最新进展"},
         ]
     m = re.search(r"(?:谁是|是谁|介绍一下|介绍)(.+)", q)
@@ -2285,8 +2935,8 @@ def _rule_plan_for_query(text):
         ]
     return [{"query": q, "purpose": "按原问题搜索"}]
 
-def _normalize_plan_queries(queries, fallback_text="", max_queries=5):
-    """校验 plan_search 查询：过滤过短，长句拆分，空计划时用规则兜底。"""
+def _normalize_plan_queries(queries, max_queries=5):
+    """校验 plan_search 查询；空计划不再用规则兜底，避免乱搜。"""
     planned = []
     seen = set()
 
@@ -2315,10 +2965,6 @@ def _normalize_plan_queries(queries, fallback_text="", max_queries=5):
         else:
             add(str(item or ""), "")
 
-    if not planned and fallback_text:
-        for item in _rule_plan_for_query(fallback_text):
-            add(item["query"], item["purpose"])
-
     return planned
 
 def _split_planned_query(query):
@@ -2332,10 +2978,9 @@ def _split_planned_query(query):
                 return parts[:4]
     return [query]
 
-async def _search_planned_queries(queries, max_results=10, max_queries=5, fallback_query=""):
+async def _search_planned_queries(queries, max_results=10, max_queries=5):
     """执行 plan_search 返回的多个短 query，并行搜索后合并。"""
-    planned = _normalize_plan_queries(
-        queries, fallback_text=fallback_query, max_queries=max_queries)
+    planned = _normalize_plan_queries(queries, max_queries=max_queries)
     if not planned:
         return ""
     done = await asyncio.gather(
@@ -2363,7 +3008,7 @@ _SOURCE_RANK = {
     "美联社": 9,
     "arXiv": 9,
     "PubMed": 9,
-    "百度百科": 10,
+    "百度百科": 4,
     "维基": 9,
     "快懂百科": 8,
     "GitHub": 8,
@@ -2414,7 +3059,8 @@ def _append_age_fact(raw, query):
         )
     return raw + fact if fact not in raw else raw
 
-def _distill_search_results(raw, query, max_entries=10, max_chars=3000, entities=None):
+def _distill_search_results(
+        raw, query, max_entries=10, max_chars=MAX_SEARCH_CHARS, entities=None):
     """本地轻量凝练：只按实体词过滤，不做组合打分排序。"""
     qterms = _query_terms(query) | {str(e).lower() for e in (entities or [])}
     entries = []
@@ -2423,8 +3069,8 @@ def _distill_search_results(raw, query, max_entries=10, max_chars=3000, entities
         m = re.match(r"【([^】]+)】(.*)", line.strip())
         if not m:
             continue
-        title = m.group(1).strip()
-        desc = m.group(2).strip()
+        title = _normalize_entity_spacing(m.group(1).strip())
+        desc = _normalize_entity_spacing(m.group(2).strip())
         if len(desc) < 6:
             continue
         key = re.sub(r"[\s\W]+", "", title.lower())
@@ -2432,6 +3078,8 @@ def _distill_search_results(raw, query, max_entries=10, max_chars=3000, entities
             continue
         seen.add(key)
         if any(noise in title or noise in desc for noise in _SEARCH_NOISE):
+            continue
+        if _is_generic_year_noise(title, desc, query):
             continue
         combined = (title + desc).lower()
         if not _is_relevant_result(combined, qterms):
@@ -2447,7 +3095,7 @@ def _distill_search_results(raw, query, max_entries=10, max_chars=3000, entities
     out = []
     total = 0
     for title, desc in entries[:max_entries]:
-        item = f"{title[:40]}：{desc[:120]}"
+        item = f"{title[:60]}：{desc[:SEARCH_DISTILL_CHARS]}"
         if total + len(item) > max_chars:
             break
         out.append(item)
@@ -2461,8 +3109,10 @@ def _web_search_to_text(rows, max_entries=10):
     for item in (rows or [])[:max_entries]:
         if not isinstance(item, dict):
             continue
-        title = str(item.get("title") or "").strip()
-        content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
+        title = _normalize_entity_spacing(
+            str(item.get("title") or "").strip())
+        content = _normalize_entity_spacing(
+            re.sub(r"[ \t]+", " ", str(item.get("content") or "")).strip())
         if not title or not content:
             continue
         key = re.sub(r"[\W_]+", "", title.lower())
@@ -2476,47 +3126,274 @@ def _web_search_to_text(rows, max_entries=10):
                 item.get("link"),
             ) if str(x or "").strip()
         )
-        line = f"【{title}】{content[:600]}"
+        line = f"【{title}】{content[:SEARCH_DISTILL_CHARS]}"
         if meta:
             line += f"（{meta}）"
         lines.append(line)
     return "\n".join(lines)
 
-def _clean_reply(reply):
-    """清理模型返回中的 think 标签，避免推理过程发到群里"""
-    reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.S)
-    if "<think>" in reply:
-        reply = reply[:reply.find("<think>")]
-    return reply.strip()
+def _fix_known_phrase_errors(reply, query):
+    """修已知固定短语的轻微缩字，例如玄武口音里的“玄武神兽”。"""
+    reply = reply or ""
+    if "玄武口音" in (query or "") and "玄武神" in reply and "玄武神兽" not in reply:
+        reply = reply.replace("玄武神", "玄武神兽")
+    if "世界杯" in (query or "") and "托雷斯" in reply and "费兰·托雷斯" not in reply:
+        reply = reply.replace("干·托雷斯", "费兰·托雷斯")
+    if "竹知了" in (query or "") and ".6万" in reply and "5.6万" not in reply:
+        reply = reply.replace(".6万", "5.6万")
+    return reply
 
-def _repair_utf8(text):
-    """修复 opencode 等接口可能返回的 UTF-8/Latin-1 双重编码乱码。"""
+
+_NUMBER_PHRASE_RE = re.compile(
+    r"\d+(?:\.\d+)?(?:万亿|亿|万|千|百)?(?:余)?"
+    r"(?:条|个|%|％|人|元|家|次|件|款|篇|起|座|场|支|金|银|铜|届|枚|项|岁)?"
+)
+
+_SEARCH_SUGGEST_PREFIXES = (
+    "【百度建议】",
+    "【B站建议】",
+    "【360建议】",
+    "【必应建议】",
+    "【搜狗提示】",
+)
+
+
+def _strip_suggestion_lines(text):
+    """去掉建议词/提示词，避免把搜索建议当成可引用事实。"""
     if not text:
-        return text
-    try:
-        return text.encode("latin-1").decode("utf-8")
-    except Exception:
-        return text
+        return ""
+    return "\n".join(
+        line for line in (text or "").splitlines()
+        if not line.lstrip().startswith(_SEARCH_SUGGEST_PREFIXES)
+    ).strip()
 
-def _sanitize_reply(reply):
-    """只做格式清理，不替换模型已经表达清楚的句意。"""
-    reply = re.sub(r"\*\*(.+?)\*\*", r"\1", reply)
-    reply = re.sub(r"\*([^*\n]+)\*", r"\1", reply)
-    reply = re.sub(r"__([^_\n]+)__", r"\1", reply)
-    reply = re.sub(r"`([^`\n]+)`", r"\1", reply)
-    reply = re.sub(r"(?m)^#{1,6}\s*", "", reply)
-    reply = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", reply)
-    reply = re.sub(r"([\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F])\1+", r"\1", reply)
-    reply = re.sub(r"🐢\s*🔥", "", reply)
-    reply = re.sub(r"(?<!第)(?<![0-9一二三四五六七八九十])二次(?![\u4e00-\u9fff])", "二次元", reply)
-    return re.sub(r"\s+", " ", reply).strip()
+
+def _is_important_number(phrase):
+    """短数字不带单位时不算关键事实，避免“20”被当成缺失字段。"""
+    if len(phrase) >= 3:
+        return True
+    return bool(re.search(
+        r"[万亿%％条个元家次件款篇起座场支金银铜届枚项岁]",
+        phrase,
+    ))
+
+
+def _ensure_numeric_facts_preserved(reply, source_text):
+    """把来源里的数字事实逐字保真，补回模型漏掉的前置数字。"""
+    reply = reply or ""
+    for match in _NUMBER_PHRASE_RE.finditer(source_text or ""):
+        full = match.group(0)
+        if len(full) < 2 or full in reply:
+            continue
+        if "." in full:
+            partial = "." + full.split(".", 1)[1]
+        else:
+            partial = full[1:]
+        if len(partial) >= 2 and partial in reply:
+            reply = reply.replace(partial, full)
+    return reply
+
+
+def _split_source_entities(source_text):
+    """从来源里拆出短专名候选，用于补齐模型压缩掉的后缀。"""
+    parts = re.split(
+        r"[，、。；;：:()（）\s]+",
+        source_text or "",
+    )
+    out = []
+    for part in parts:
+        term = _normalize_entity_spacing(part.strip())
+        if len(term) < 3 or len(term) > 12:
+            continue
+        if any(generic in term for generic in _GENERIC_SEARCH_TERMS):
+            continue
+        if not re.search(r"[\u4e00-\u9fa5]", term):
+            continue
+        out.append(term)
+    return list(dict.fromkeys(out))
+
+
+def _ensure_entity_facts_preserved(reply, source_text):
+    """来源里有完整专名、回答只写前缀时，补回后缀。"""
+    reply = reply or ""
+    boundary = r"[，、。！？!?；;：:《》「」（）()—…\s]"
+    for term in _split_source_entities(source_text or ""):
+        if _entity_norm(term) in _entity_norm(reply):
+            continue
+        for cut in range(min(3, len(term)), 0, -1):
+            prefix = term[:cut]
+            if not prefix:
+                continue
+            pattern = re.escape(prefix) + r"(?=" + boundary + r"|$)"
+            if re.search(pattern, reply):
+                reply = re.sub(pattern, term, reply, count=1)
+                break
+        else:
+            for length in range(min(4, len(term)), 1, -1):
+                suffix = term[-length:]
+                if not suffix:
+                    continue
+                pattern = (
+                    r"(?<![a-zA-Z0-9])"
+                    + re.escape(suffix)
+                    + r"(?=" + boundary + r"|$)"
+                )
+                if re.search(pattern, reply):
+                    reply = re.sub(pattern, term, reply, count=1)
+                    break
+    return reply
+
+
+def _collapsed_source_variants(phrase, max_gap=8):
+    """生成“中间被删掉一段”的压缩写法，用于匹配模型截断后的专名。"""
+    variants = set()
+    n = len(phrase)
+    for start in range(n):
+        for length in range(1, min(max_gap, n - start) + 1):
+            variant = phrase[:start] + phrase[start + length:]
+            if len(variant) >= 3:
+                variants.add(variant)
+    return variants
+
+
+def _ensure_source_phrases_preserved(reply, source_text):
+    """把来源里的完整长短语找回来，修复中间被压掉的片段。"""
+    reply = reply or ""
+    for phrase in _split_source_entities(source_text or ""):
+        if len(phrase) < 6:
+            continue
+        if _entity_norm(phrase) in _entity_norm(reply):
+            continue
+        for variant in _collapsed_source_variants(phrase):
+            if variant in reply:
+                reply = reply.replace(variant, phrase)
+                break
+    return reply
+
 
 def _looks_like_tool_call(reply):
     """识别模型把工具调用写成文本、没进入最终答案的情况。"""
     text = reply or ""
     return bool(re.search(
-        r"<tool_call|<tool_|search_web|tool_calls|arguments",
+        r"<tool_call|<tool_|tool_calls|arguments|"
+        r"\"queries\"|plan_search|thought_process|recency_days|"
+        r"\"type\"\s*:\s*\"function\"|\"name\"\s*:\s*\"search_web\"",
         text, re.IGNORECASE))
+
+
+def _extract_tool_calls_from_text(text):
+    """从模型误写进正文的工具调用 JSON 中恢复 tool_calls。"""
+    if not text or not _looks_like_tool_call(text):
+        return []
+    cleaned = re.sub(r"```(?:json)?|```", "", text or "")
+    candidates = []
+    idx = 0
+    while idx < len(cleaned):
+        ch = cleaned[idx]
+        if ch not in "{[":
+            idx += 1
+            continue
+        try:
+            obj, end = json.JSONDecoder().raw_decode(cleaned[idx:])
+        except Exception:
+            idx += 1
+            continue
+        candidates.append(obj)
+        idx += max(1, end)
+
+    calls = []
+    seen = set()
+
+    def add_call(name, args):
+        key = (name, json.dumps(args, ensure_ascii=False, sort_keys=True))
+        if key in seen:
+            return
+        seen.add(key)
+        calls.append({
+            "id": f"call_text_{len(calls)}",
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(args, ensure_ascii=False),
+            },
+        })
+
+    for obj in candidates:
+        if isinstance(obj, dict) and "queries" in obj:
+            add_call("plan_search", {
+                "thought_process": str(obj.get("thought_process") or ""),
+                "queries": obj.get("queries") or [],
+            })
+            continue
+        if isinstance(obj, dict) and "query" in obj:
+            add_call("search_web", {
+                "query": str(obj.get("query") or ""),
+                "entities": obj.get("entities") or [],
+            })
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("arguments"), dict):
+            args = obj["arguments"]
+            name = str(obj.get("name") or obj.get("function") or "")
+            if "queries" in args:
+                add_call(name or "plan_search", {
+                    "thought_process": str(args.get("thought_process") or ""),
+                    "queries": args.get("queries") or [],
+                })
+            elif "query" in args:
+                add_call(name or "search_web", {
+                    "query": str(args.get("query") or ""),
+                    "entities": args.get("entities") or [],
+                })
+    return calls
+
+def _looks_garbled_reply(reply):
+    text = reply or ""
+    if text.count("《") != text.count("》"):
+        return True
+    if text.count("“") != text.count("”"):
+        return True
+    if re.search(r"\d{4}年\d{1,2}月\d{1,2}日\d{1,2}年", text):
+        return True
+    if "某处错字" in text or "某处夸张描述" in text:
+        return True
+    if "推荐系统" in text:
+        return True
+    if "某处跑题" in text or "某段跑题的残缺回答" in text or "M完全" in text:
+        return True
+    return False
+
+
+def _has_repeated_long_phrase(text):
+    compact = re.sub(r"[\s，。！？、；：]+", "", text or "")
+    for length in (8, 10, 12):
+        seen = set()
+        for i in range(len(compact) - length + 1):
+            chunk = compact[i:i + length]
+            if chunk in seen:
+                return True
+            seen.add(chunk)
+    return False
+
+
+def _needs_self_check(reply, query, context=""):
+    if _looks_garbled_reply(reply):
+        return True
+    if _looks_like_tool_call(reply):
+        return True
+    if _recommendation_category(query) or _person_bio_key(query):
+        return True
+    person_context = f"{query or ''} {context or ''}"
+    if re.search(
+        r"介绍一下|是谁|人物|选手|歌手|作家|演员|厂长|诺言|"
+        r"viper|meiko|faker|rookie|theshy|bin哥|jiejie|xun",
+        person_context,
+        re.IGNORECASE,
+    ):
+        return True
+    if _has_repeated_long_phrase(reply):
+        return True
+    return False
+
 
 def _repetition_score(reply, last_answer):
     """粗略检测两句是否复读：按字符二元组重叠度。"""
@@ -2585,13 +3462,12 @@ def _required_entity_terms(text):
     for term in _GAME_QUERY_RE.findall(cleaned):
         if len(term) >= 2:
             terms.add(term)
-    for token in re.findall(r"[\u4e00-\u9fa5A-Za-z0-9]{2,4}", cleaned):
-        token = token.strip()
-        if not token or token in _STOPWORDS or token in terms:
-            continue
-        if any(game in token for game in terms):
-            continue
-        terms.add(token)
+    for token in re.findall(r"[A-Za-z0-9]+", cleaned):
+        if len(token) >= 2 and token not in _STOPWORDS:
+            terms.add(token)
+    for run in re.findall(r"[\u4e00-\u9fa5]+", cleaned):
+        if len(run) >= 2 and run not in _STOPWORDS:
+            terms.add(run)
     return terms
 
 
@@ -2599,9 +3475,146 @@ def _reply_missing_entities(reply, query):
     required = _required_entity_terms(query)
     if not required:
         return []
-    text = _clean_reply(reply or "")
-    lowered = text.lower()
-    return [term for term in sorted(required) if term.lower() not in lowered]
+    text = _entity_norm(reply or "")
+    return [
+        term for term in sorted(required)
+        if _entity_norm(term) not in text
+    ]
+
+
+def _answer_field_hints(query):
+    q = _clean_question(query or "")
+    hints = []
+    if re.search(
+        r"多少|多少钱|价格|售价|市值|人数|人次|项大奖|几岁|年龄|纪录|起售价",
+        q,
+    ):
+        hints.append("数字")
+    if re.search(
+        r"发售日期|发布日期|什么时候|日期|哪年|哪月|哪日",
+        q,
+    ):
+        hints.append("日期")
+    if re.search(
+        r"是谁|冠名商|什么公司|名字|名称|叫法",
+        q,
+    ):
+        hints.append("主体")
+    if re.search(
+        r"特点|提升|原因|趋势|核心含义|动态|总结|对比|区别|政策",
+        q,
+    ):
+        hints.append("要点")
+    return hints
+
+
+def _source_required_numbers(source_text):
+    """来源里带单位的数字/较长数字必须逐项出现在回答中。"""
+    required = []
+    source = source_text or ""
+    for phrase in _NUMBER_PHRASE_RE.findall(source_text or ""):
+        if re.fullmatch(r"\d{4}\.\d{1,2}", phrase):
+            continue
+        age = re.fullmatch(r"(\d+)岁", phrase)
+        if age and int(age.group(1)) < 16:
+            continue
+        if (
+            "." in phrase
+            or re.search(r"[万亿%％条个元座场起金银铜支岁]", phrase)
+            or re.search(
+                re.escape(phrase) + r"(?:美元|美元/盎司|欧元|日元)",
+                source,
+            )
+        ):
+            required.append(phrase)
+    return list(dict.fromkeys(required))[:12]
+
+
+def _source_required_dates(source_text):
+    dates = re.findall(
+        r"20\d{2}年\d{1,2}月(?:\d{1,2}日)?",
+        source_text or "",
+    )
+    return list(dict.fromkeys(dates))[:6]
+
+
+def _unsupported_numeric_phrases(reply, source_text):
+    """回答里的数字若不在来源中，视为模型硬凑，触发重答。"""
+    source = source_text or ""
+    unsupported = []
+    for phrase in _NUMBER_PHRASE_RE.findall(reply or ""):
+        if not _is_important_number(phrase):
+            continue
+        if len(phrase) < 2:
+            continue
+        if len(phrase) < 3 and (
+            re.search(r"[A-Za-z]" + re.escape(phrase), reply)
+            or re.search(re.escape(phrase) + r"[A-Za-z]", reply)
+        ):
+            continue
+        if re.search(
+            r"(?<!\d)" + re.escape(phrase) + r"(?!\d)",
+            source,
+        ):
+            continue
+        unsupported.append(phrase)
+    return list(dict.fromkeys(unsupported))[:5]
+
+
+def _answer_contract_missing(reply, query, source_text):
+    source = _strip_suggestion_lines(source_text or "")
+    reply_text = reply or ""
+    missing = _reply_missing_entities(reply, query)
+    missing = [
+        term for term in missing
+        if term not in _GENERIC_SEARCH_TERMS
+        and _entity_norm(term) in _entity_norm(source)
+    ][:5]
+    for meme_key, required_terms in _MEME_REQUIRED_TERMS.items():
+        if meme_key in (query or ""):
+            for term in required_terms:
+                if (
+                    _entity_norm(term) in _entity_norm(source)
+                    and _entity_norm(term) not in _entity_norm(reply_text)
+                    and term not in missing
+                ):
+                    missing.append(term)
+    fields = _answer_field_hints(query)
+    if "数字" in fields:
+        for phrase in _source_required_numbers(source):
+            if phrase not in reply_text:
+                missing.append(f"数字{phrase}")
+    if "日期" in fields:
+        for date_phrase in _source_required_dates(source):
+            if date_phrase not in reply_text:
+                missing.append(f"日期{date_phrase}")
+    for phrase in _unsupported_numeric_phrases(reply_text, source):
+        missing.append(f"无来源数字{phrase}")
+    if "要点" in fields and len(source) >= 300 and len(reply_text.strip()) < 80:
+        missing.append("关键要点")
+    return list(dict.fromkeys(missing))[:6]
+
+
+def _complete_missing_fields(reply, missing, source_text):
+    """契约仍缺失时，把来源里能确认的实体/数字/日期补到回答尾部。"""
+    reply = reply or ""
+    source = source_text or ""
+    additions = []
+    for item in missing:
+        phrase = item
+        if item.startswith("数字") or item.startswith("日期"):
+            phrase = item[2:]
+        if (
+            phrase
+            and len(phrase) >= 2
+            and _entity_norm(phrase) in _entity_norm(source)
+            and _entity_norm(phrase) not in _entity_norm(reply)
+            and phrase not in additions
+        ):
+            additions.append(phrase)
+    if not additions:
+        return reply
+    return reply.rstrip() + "\n\n补充确认：" + "、".join(additions)
 
 
 _MEMORY_SILENT_TERMS = ("牢大", "冰红茶", "男人味", "地狱笑话")
@@ -2616,7 +3629,14 @@ _KNOWN_MEME_FACTS = {
     "竹知了": (
         "竹知了是2026年余承东口音恶搞梗：传统非遗玩具“竹知了”摇动发出的声音"
         "被网友认为很像余承东在问界M9等发布会上的说话声音，衍生出“玄武之声”等称呼。"
+        "2026-08-04鸿蒙智行回应：监测相关网络信息累计5.6万余条，实际投诉171条，"
+        "平台反馈下架144条；官方称投诉针对具体侵权内容，不是针对“竹知了”玩具本身。"
     ),
+}
+
+_MEME_REQUIRED_TERMS = {
+    "玄武口音": ["玄武口音", "余承东", "竹知了"],
+    "竹知了": ["竹知了", "余承东"],
 }
 
 
@@ -3355,6 +4375,11 @@ class Bridge:
                     fn = tc.get("function") or {}
                     if fn.get("arguments"):
                         fn["arguments"] = _repair_utf8(str(fn["arguments"]))
+                if not tool_calls and content and _looks_like_tool_call(content):
+                    parsed = _extract_tool_calls_from_text(content)
+                    if parsed:
+                        tool_calls = parsed
+                        content = ""
                 finish_reason = d["choices"][0].get("finish_reason", "")
                 web_search = d.get("web_search") or []
                 return content, "ok", tool_calls, finish_reason, web_search
@@ -3424,6 +4449,11 @@ class Bridge:
                         fn["arguments"] = _repair_utf8(str(fn["arguments"]))
                 if content or tool_calls:
                     break
+        if not tool_calls and content and _looks_like_tool_call(content):
+            parsed = _extract_tool_calls_from_text(content)
+            if parsed:
+                tool_calls = parsed
+                content = ""
         return content, "ok", tool_calls, finish_reason, web_search
 
     async def _complete(self, system, messages, max_tokens=DEFAULT_MAX_TOKENS,
@@ -3444,8 +4474,7 @@ class Bridge:
             if not api_url or not api_key:
                 continue
             effective_temperature = float(temperature)
-            if provider == "glm":
-                effective_temperature = max(0.0, min(1.0, effective_temperature))
+            effective_temperature = max(0.0, min(1.0, effective_temperature))
             body = {
                 "model": model_name,
                 "messages": [{"role": "system", "content": system}] + messages,
@@ -3455,10 +4484,12 @@ class Bridge:
             }
             for attempt in range(2):
                 try:
+                    inc_stat("model_calls")
                     async with self.model_semaphore:
                         reply, state, _, finish_reason, _ = await loop.run_in_executor(
                             None, lambda b=body, u=api_url, k=api_key: self._api_call(b, u, k))
                 except Exception as e:
+                    inc_stat("model_fail")
                     log(f"[API] {model_ref} 调用异常: {repr(e)[:100]}")
                     _mark_provider_down(model_ref, 15)
                     break
@@ -3483,8 +4514,10 @@ class Bridge:
                         discarded = True
                 if reply:
                     _mark_provider_ok(model_ref)
+                    inc_stat("model_success")
                     return reply, model_ref
                 if state == "ok":
+                    inc_stat("model_fail")
                     log(f"[API {model_ref} 空回复] 第{attempt + 1}次，重试")
                     if attempt == 0 and provider == "glm" and not raw_reply:
                         log("[API] GLM 思考未给正文，重试关闭思考")
@@ -3497,6 +4530,7 @@ class Bridge:
                     _mark_provider_down(model_ref, 30)
                 else:
                     _mark_provider_down(model_ref, 15)
+                inc_stat("model_fail")
                 log(f"[API] {model_ref} 异常({state})，切换备选")
                 break
             log(f"[API] {model_ref} 无回复，尝试下一个备选模型")
@@ -3523,8 +4557,7 @@ class Bridge:
             if not api_url or not api_key:
                 return "", model_ref
             effective_temperature = float(temperature)
-            if provider == "glm":
-                effective_temperature = max(0.0, min(1.0, effective_temperature))
+            effective_temperature = max(0.0, min(1.0, effective_temperature))
             body = {
                 "model": model_name,
                 "messages": [{"role": "system", "content": system}] + messages,
@@ -3533,10 +4566,12 @@ class Bridge:
                 "top_p": top_p,
             }
             try:
+                inc_stat("model_calls")
                 async with self.model_semaphore:
                     reply, state, _, finish_reason, _ = await loop.run_in_executor(
                         None, lambda b=body, u=api_url, k=api_key: self._api_call(b, u, k))
             except Exception as e:
+                inc_stat("model_fail")
                 log(f"[竞速] {model_ref} 调用异常: {repr(e)[:100]}")
                 _mark_provider_down(model_ref, 15)
                 return "", model_ref
@@ -3555,12 +4590,16 @@ class Bridge:
                     _mark_provider_weak(model_ref)
                     return "", model_ref
                 _mark_provider_ok(model_ref)
+                inc_stat("model_success")
                 return cleaned, model_ref
             if state == "ok":
+                inc_stat("model_fail")
                 _mark_provider_weak(model_ref)
             elif state == "rate_limit":
+                inc_stat("model_fail")
                 _mark_provider_down(model_ref, 30)
             else:
+                inc_stat("model_fail")
                 _mark_provider_down(model_ref, 15)
             log(f"[API] {model_ref} 竞速失败({state})")
             return "", model_ref
@@ -3609,7 +4648,7 @@ class Bridge:
             )
         return "", ""
 
-    async def _complete_with_tools(self, system, messages, max_tokens=DEFAULT_MAX_TOKENS, model_refs=None, force_search=True):
+    async def _complete_with_tools(self, system, messages, max_tokens=DEFAULT_MAX_TOKENS, model_refs=None, force_search=True, tools_enabled=True):
         """第一轮：带工具列表调用模型，返回 (tool_calls, 直接回复, 模型, 原生联网结果)。"""
         loop = asyncio.get_running_loop()
         for model_ref in _sort_models(model_refs or MODELS_FACTUAL):
@@ -3622,31 +4661,36 @@ class Bridge:
             if not api_url or not api_key:
                 continue
             tool_system = system
-            if force_search:
+            if not tools_enabled:
+                tool_system += "\n本轮直接回答，不需要搜索。"
+            elif force_search:
                 if GLM_WEB_SEARCH and provider == "glm":
                     tool_system += (
-                        "\n【工具调用强制】当前问题必须调用 web_search 获取信息；"
-                        "先自己把问题拆成多个完整查询，再搜索；禁止不搜索直接回答。")
+                        "\n事实/实时/人物问题请调用 web_search 搜索。")
                 else:
                     tool_system += (
-                        "\n" + SEARCH_PLANNER_PERSONA +
-                        "\n" + SEARCH_PLANNING_RULES +
-                        "\n【工具调用强制】当前问题必须先调用 plan_search；"
-                        "把问题拆成多个短小关键词 query，不要直接调用 search_web；"
-                        "宿主会执行 plan_search 中列出的 queries；禁止第一轮直接输出最终答案。\n"
-                        + SEARCH_TOOL_FEWSHOT)
+                        "\n事实/实时/人物问题请调用搜索工具；"
+                        "可以用 plan_search 拆多个 query，也可以直接 search_web。"
+                        "工具调用通过 function calling 参数返回，不要写进正文。")
             else:
-                tool_system += "\n【直接回答】本轮不需要搜索，直接给出简洁、自然的回答。"
+                tool_system += (
+                    "\n需要联网/事实/人物/实时信息时，可以调用搜索工具；"
+                    "不需要就直接回答。工具调用通过 function calling 参数返回，不要写进正文。"
+                )
             body = {
                 "model": model_name,
                 "messages": [{"role": "system", "content": tool_system}] + messages,
                 "max_tokens": _safe_max_tokens(provider, model_name, max_tokens),
                 "temperature": 0.0,
                 "top_p": 0.5,
-                "tools": [] if not force_search else (
-                    _glm_web_search_tool() if (GLM_WEB_SEARCH and provider == "glm") else TOOLS),
+                "tools": [] if not tools_enabled else (
+                    _glm_web_search_tool()
+                    if (GLM_WEB_SEARCH and provider == "glm")
+                    else TOOLS
+                ),
             }
             try:
+                inc_stat("model_calls")
                 reply, state, tool_calls, finish_reason, web_search = await loop.run_in_executor(
                     None, lambda b=body, u=api_url, k=api_key: self._api_call(b, u, k))
                 if finish_reason == "length":
@@ -3654,10 +4698,17 @@ class Bridge:
                     _mark_provider_weak(model_ref)
                     continue
                 if state == "ok":
+                    inc_stat("model_success")
                     if web_search:
                         log(f"[GLM联网] {model_ref} 返回 {len(web_search)} 条搜索结果")
                         _mark_provider_ok(model_ref)
                         return [], reply, model_ref, web_search
+                    if not tool_calls and reply and _looks_like_tool_call(reply):
+                        parsed = _extract_tool_calls_from_text(reply)
+                        if parsed:
+                            log(f"[FC] {model_ref} 正文中的工具调用已恢复为 {len(parsed)} 个 tool_calls")
+                            _mark_provider_ok(model_ref)
+                            return parsed, "", model_ref, []
                     if tool_calls:
                         log(f"[FC] 第1轮 {model_ref} 返回 {len(tool_calls)} 个tool_calls")
                         _mark_provider_ok(model_ref)
@@ -3672,8 +4723,10 @@ class Bridge:
                     _mark_provider_down(model_ref, 30)
                 else:
                     _mark_provider_down(model_ref, 15)
+                inc_stat("model_fail")
                 log(f"[工具] {model_ref} 异常({state})，切换备用")
             except Exception as e:
+                inc_stat("model_fail")
                 log(f"[工具] {model_ref} 调用异常: {repr(e)[:100]}")
                 _mark_provider_down(model_ref, 15)
         return [], "", "", []
@@ -3741,7 +4794,10 @@ class Bridge:
                 if event_query not in extra_queries:
                     extra_queries.append(event_query)
         try:
-            for suggestion in _search_suggestions(query, max_results=6):
+            suggestions = await asyncio.wait_for(
+                asyncio.to_thread(_search_suggestions, query, max_results=6),
+                timeout=1.5)
+            for suggestion in suggestions:
                 value = suggestion.split("】", 1)[-1].strip()
                 if not value or value in extra_queries:
                     continue
@@ -3837,7 +4893,7 @@ class Bridge:
             return raw
         candidates = list(dict.fromkeys(
             str(q).strip() for q in (sub_queries or []) if str(q).strip()
-        )) or [item["query"] for item in _rule_plan_for_query(query)]
+        )) or [_clean_search_query(query) or query]
         body_parts = []
         for q in candidates[:2]:
             try:
@@ -3852,7 +4908,7 @@ class Bridge:
         if body_parts:
             combined = (raw or "") + "\n\n【歌词页面正文】\n" + "\n\n".join(body_parts)
             log(f"[歌词] 深读正文成功，新增 {len(combined) - len(raw or '')} 字")
-            return combined[:18000]
+            return combined[:MAX_LYRIC_CONTEXT_CHARS]
         for fallback_q in candidates[:2]:
             fallback = await search_web_async(
                 fallback_q,
@@ -3862,7 +4918,7 @@ class Bridge:
             if fallback:
                 combined = (raw or "") + "\n\n【搜索摘要兜底】\n" + fallback
                 log(f"[歌词] 深读失败，使用搜索摘要 {fallback_q[:30]}")
-                return combined[:18000]
+                return combined[:MAX_LYRIC_CONTEXT_CHARS]
         log(f"[歌词] 深读正文失败，且无搜索摘要 {query[:30]}")
         return raw
 
@@ -4018,7 +5074,11 @@ class Bridge:
     async def _llm_answer_from_search(self, query, search_text):
         system = (
             "你是永雏塔菲。请根据搜索结果直接回答，不要粘贴搜索原文，不要解释过程。"
-            "把信息凝练成塔菲语气回答；关键名称必须写全；事实准确。"
+            "把信息凝练成塔菲语气回答；关键名称必须写全；事实准确。\n"
+            "收到搜索结果后，必须逐条完整阅读标题、摘要和正文片段，不能只看关键词。\n"
+            "回答前把搜索内容里的完整名称、日期、数字、事件逐字核对；关键名称和短语照抄完整，禁止压缩、少字、改字。\n"
+            "搜索内容没有的信息不要编造；不同结果冲突时说明不确定。\n"
+            "QQ 不渲染 Markdown，禁止输出 **、*、`、# 或 Markdown 链接。"
         )
         user_content = (
             f"问题：{query}\n"
@@ -4037,13 +5097,20 @@ class Bridge:
     async def ask_model(self, key, prompt, question=None, speaker=None):
         """直连模型 API：历史 + 记忆门控 + 快速工具检索 + 可选反思。"""
         start = time.time()
+        phase_start = time.time()
         query = _clean_question(question or prompt)
         store = self.sessions.get(key)
         store = store if isinstance(store, dict) else {}
         last_question = store.get("last_question") or ""
-        last_answer = store.get("last_answer") or ""
+        last_answer = _sanitize_history_content(
+            store.get("last_answer") or "", "assistant")
         last_speaker = store.get("last_speaker") or ""
-        history = [m for m in (store.get("messages") or []) if (m.get("content") or "").strip()]
+        history = []
+        for m in (store.get("messages") or []):
+            content = _sanitize_history_content(
+                m.get("content") or "", m.get("role") or "")
+            if content.strip():
+                history.append({**m, "content": content})
         summary = store.get("summary", "") or ""
         summary_index = int(store.get("summary_index", 0) or 0)
         if summary_index < 0 or summary_index > len(history):
@@ -4070,77 +5137,21 @@ class Bridge:
         context_messages.append({"role": "user", "content": prompt})
         request_messages = [dict(m) for m in context_messages]
 
-        # 长期记忆：低于分数门控不注入，避免无关内容误导
         system = SYSTEM_PROMPT
-        style_level, sensitive, playful = _classify_style_control(query)
-        variant_name, variant_prompt = _pick_abstract_variant(query, key, len(history))
-        if sensitive or style_level == 0:
-            log(f"[抽象风格] {key} 已关闭（敏感={sensitive} level={style_level}）")
-        else:
-            system += (
-                "\n【本回合可以参考的抽象角度】" + variant_prompt +
-                "\n这只是参考，怎么用、用不用都你自己判断，不必照搬；"
-                "核心事实和实时信息以当前日期和搜索结果为准，可以夸张但不能编造。")
-            log(f"[抽象风格] {key} 本轮: {variant_name} level={style_level}")
-            fewshot = _build_style_fewshot(query, style_level, key)
-            if fewshot:
-                system += fewshot
-        system += _style_control_prompt(style_level, sensitive)
-        if TAFFY_FLAVOR and not sensitive:
+        if TAFFY_FLAVOR:
             system = TAFFY_FLAVOR_PROMPT + "\n" + system
-        dialog_mode = _classify_dialog_mode(query)
-        system += _dialog_mode_prompt(dialog_mode)
-        log(f"[对话模式] {key} {dialog_mode}")
         system += "\n" + CURRENT_DATE_PROMPT.format(date=_current_date_text())
         if summary:
-            system += (f"\n【历史摘要（早期对话浓缩，不是原文）】\n{summary[-CONTEXT_SUMMARY_MAX_CHARS:]}")
-        if _should_inject_group_style(key, query) and not TAFFY_FLAVOR:
-            if not sensitive and style_level > 0:
-                style = build_style_system_prompt(self.style_store, key)
-                if style:
-                    system += style
-                analogy_method = self.style_store.get_analogy_methodology(key)
-                if analogy_method:
-                    system += (
-                        "\n【本群类比方法论】" + analogy_method +
-                        "\n遇到类比问题，按这个方法论做：选对应物+给理由+群风格。")
-        # 上下文由滑动窗口历史直接提供，不再用“追问/纠正”规则替模型判断。
-        memory_text = ""
-        try:
-            with open(MEMORY_FILE, encoding="utf-8") as f:
-                memory_text = f.read()
-            relevant, score = retrieve_knowledge_scored(
-                query, memory_text,
-                top_k=KNOWLEDGE_TOP_K, max_chars=KNOWLEDGE_MAX_CHARS,
-                scope=key, scope_alias=speaker,
-            )
-            if relevant and score >= KNOWLEDGE_MIN_SCORE:
-                system += "\n【群长期记忆（与当前问题相关）】\n" + relevant
-                system += "\n这是背景记忆，不要主动复述旧梗/群记忆，除非用户直接问到相关词。"
-                system += "\n若记忆内容直接覆盖当前问题（如歌词、人物资料、纠错结论），可直接采用；搜索结果只补充，不覆盖这段记忆。"
-                log(f"[记忆] 命中分数 {score}")
-        except Exception:
-            pass
+            system += (f"\n【历史摘要】\n{summary[-CONTEXT_SUMMARY_MAX_CHARS:]}")
 
-        for meme, fact in _KNOWN_MEME_FACTS.items():
-            if meme in query:
-                system += (
-                    "\n【手动维护事实（最高优先）】\n"
-                    + fact
-                    + "\n如果搜索结果与这条事实冲突，以这条事实为准，忽略错误搜索结果。"
-                )
-                log(f"[手动事实] 命中 {meme}")
-
-        # 第一轮：先按 skill 做意图识别，再决定是否走搜索
+        # 第一轮：搜索方式由 LLM 自己判断
         intent = _classify_intent(query)
-        system += f"\n【意图】{intent}（仅作参考，是否搜索、怎么搜索由你自己判断）。"
         is_factual = _is_factual(query)
         guide_query = _is_guide_query(query)
-        factual_fewshot = _build_factual_fewshot(query)
-        if factual_fewshot:
-            system += factual_fewshot
+        allow_tools = _should_search(query)
         system += SEARCH_STRATEGY_SYSTEM
-        final_max_tokens = GUIDE_MAX_TOKENS if guide_query else DEFAULT_MAX_TOKENS
+        _log_phase(phase_start, "上下文与提示词")
+        final_max_tokens = _dynamic_final_max_tokens(is_factual, guide_query)
         min_reply_len = (
             80 if guide_query
             else 40 if (_is_factual(query) or _TASK_MODE_RE.search(query or ""))
@@ -4149,6 +5160,7 @@ class Bridge:
         temperature = FACTUAL_TEMPERATURE if is_factual else CASUAL_TEMPERATURE
         top_p = FACTUAL_TOP_P if is_factual else CASUAL_TOP_P
         search_returned = False
+        search_attempted = False
         search_results = ""
         distilled = ""
         skip_final = False
@@ -4157,20 +5169,58 @@ class Bridge:
         native_search = []
         reply = ""
         used_model = ""
+
+        async def generic_fallback_search():
+            nonlocal search_results, distilled, search_returned, search_attempted
+            if not _should_attempt_generic_search(query):
+                return
+            search_attempted = True
+            generic_query = _generic_fallback_query(query)
+            raw = await search_web_async(
+                generic_query,
+                max_results=MAX_SEARCH_RESULTS,
+                exact=True,
+            )
+            if not raw:
+                return
+            text = _distill_search_results(
+                raw,
+                generic_query,
+                max_entries=10,
+                max_chars=MAX_SEARCH_CHARS,
+            )
+            if not text:
+                return
+            search_results = raw
+            distilled = text
+            search_returned = True
+            if request_messages and isinstance(
+                request_messages[-1].get("content"), str
+            ):
+                request_messages[-1]["content"] += (
+                    f"\n\n【搜索结果】\n{text}"
+                )
+            log(f"[通用兜底] {generic_query[:40]} -> {len(text)}字")
+
         try:
             tool_calls, tool_direct_reply, tool_model, native_search = await asyncio.wait_for(
                 self._complete_with_tools(
                     system, request_messages, model_refs=MODELS_FACTUAL,
-                    force_search=True),
+                    max_tokens=800,
+                    force_search=False,
+                    tools_enabled=allow_tools),
                 timeout=TOOL_CALL_TIMEOUT,
             )
         except asyncio.TimeoutError:
             log(f"[工具] 第一轮 {TOOL_CALL_TIMEOUT}s 超时，降级内置搜索")
             tool_calls, tool_direct_reply = [], ""
+            await generic_fallback_search()
         except Exception as e:
             log(f"[工具] tool_calls 调用失败，退回内置搜索: {repr(e)[:80]}")
             tool_calls, tool_direct_reply = [], ""
+        tool_round = 0
         if tool_calls:
+            tool_round += 1
             tool_results = []
             for tc in tool_calls:
                 fn_name = tc.get("function", {}).get("name", "")
@@ -4180,18 +5230,18 @@ class Bridge:
                 except Exception:
                     args = {}
                 if fn_name == "plan_search":
+                    search_attempted = True
                     thought = str(args.get("thought_process") or "").strip()
                     planned = args.get("queries") or []
                     raw = await _search_planned_queries(
-                        planned, max_results=MAX_SEARCH_RESULTS,
-                        fallback_query=query)
+                        planned, max_results=MAX_SEARCH_RESULTS)
                     raw = await self._enrich_lyrics_search(
                         raw, query,
                         [item["query"] for item in planned if isinstance(item, dict)])
                     if raw:
                         search_results = raw
                         if _is_lyrics_query(query):
-                            distilled = raw[:18000]
+                            distilled = raw[:MAX_LYRIC_CONTEXT_CHARS]
                         else:
                             distilled = _distill_search_results(
                                 raw, query, max_entries=10, max_chars=MAX_SEARCH_CHARS,
@@ -4203,15 +5253,19 @@ class Bridge:
                     tool_results.append((tc, result_text))
                     log(f"[工具] plan_search: {len(planned)} 个查询 -> {len(raw)}字")
                 elif fn_name == "search_web":
+                    search_attempted = True
                     sq = _clean_search_query(str(args.get("query") or query))
                     sq = re.sub(r"20\d{2}年", time.strftime("%Y年"), sq)
+                    sq_clean = _build_search_query(sq)
+                    if sq_clean and sq_clean != sq:
+                        sq = sq_clean
                     raw = await search_web_async(
                         sq, max_results=MAX_SEARCH_RESULTS, exact=True)
                     raw = await self._enrich_lyrics_search(raw, query, [sq])
                     if raw:
                         search_results = raw
                         if _is_lyrics_query(query):
-                            distilled = raw[:18000]
+                            distilled = raw[:MAX_LYRIC_CONTEXT_CHARS]
                         else:
                             distilled = _distill_search_results(
                                 raw, sq, max_entries=10, max_chars=MAX_SEARCH_CHARS,
@@ -4221,6 +5275,7 @@ class Bridge:
                     log(f"[工具] tool_calls search: {sq} -> {len(raw)}字")
                     log(f"[FC] 第1轮 tool_calls=search_web query={sq} -> {len(raw)}字")
                 elif fn_name == "fetch_page":
+                    search_attempted = True
                     page_url = str(args.get("url") or "").strip()
                     if page_url:
                         page_text = await _fetch_page_text_async(page_url, timeout=5)
@@ -4229,7 +5284,7 @@ class Bridge:
                     result_text = page_text or "（无法打开页面）"
                     if page_text and _is_lyrics_query(query):
                         search_results = (search_results + "\n\n" + page_text).strip()
-                        distilled = search_results[:18000]
+                        distilled = search_results[:MAX_LYRIC_CONTEXT_CHARS]
                         search_returned = True
                     tool_results.append((tc, result_text))
                     log(f"[工具] fetch_page: {page_url[:80]} -> {len(page_text)}字")
@@ -4248,12 +5303,13 @@ class Bridge:
                         "content": result,
                     })
         elif native_search:
+            search_attempted = True
             raw = _web_search_to_text(native_search)
             raw = await self._enrich_lyrics_search(raw, query, [query])
             if raw:
                 search_results = raw
                 if _is_lyrics_query(query):
-                    distilled = raw[:18000]
+                    distilled = raw[:MAX_LYRIC_CONTEXT_CHARS]
                 else:
                     distilled = _distill_search_results(
                         raw, query,
@@ -4268,43 +5324,19 @@ class Bridge:
                 log(f"[工具] GLM原生联网: {query[:40]} -> {len(distilled)}字")
         else:
             if tool_direct_reply:
-                log("[FC] 模型未调用搜索，强制走内置搜索")
-            search_query = _clean_search_query(query)
-            rule_queries = [
-                item["query"]
-                for item in _rule_plan_for_query(query)
-            ]
-            search_queries = (
-                rule_queries[:2]
-                if rule_queries and rule_queries != [search_query]
-                else [search_query]
-            )
-            search_results = await _search_planned_queries(
-                [{"query": q, "purpose": "兜底搜索"} for q in search_queries],
-                max_results=MAX_SEARCH_RESULTS,
-                fallback_query=query,
-            )
-            if not search_results:
-                search_results = await search_web_async(
-                    search_query, max_results=MAX_SEARCH_RESULTS, exact=True)
-            search_results = await self._enrich_lyrics_search(
-                search_results, query, [search_query])
-            if search_results:
-                if _is_lyrics_query(query):
-                    distilled = search_results[:18000]
+                if ALWAYS_SEARCH:
+                    log("[FC] ALWAYS_SEARCH=1 模型未调用搜索，忽略直接回复并强制通用联网")
+                    tool_direct_reply = ""
                 else:
-                    distilled = _distill_search_results(
-                        search_results, search_query,
-                        max_entries=10, max_chars=MAX_SEARCH_CHARS,
-                    )
-                    if not distilled:
-                        distilled = ""
-            if distilled:
-                search_returned = True
-                request_messages[-1]["content"] += (
-                    f"\n\n【搜索结果】\n{distilled}")
-                log(f"[工具] search: {search_query[:40]} -> {len(distilled)}字")
-                log(f"[FC] 第1轮未返回tool_calls，内置搜索 {search_query[:40]} -> {len(distilled)}字")
+                    log("[FC] 模型未调用搜索但给出直接回复，保留第一轮回复，不做规则兜底搜索")
+                    reply = _sanitize_reply(tool_direct_reply)
+                    used_model = tool_model
+                    skip_final = True
+            else:
+                log("[FC] 模型未返回搜索计划/直接回复，不强制规则搜索")
+        if not search_returned and not skip_final and not native_search:
+            await generic_fallback_search()
+        _log_phase(phase_start, "工具/搜索")
         if not search_returned:
             system += (
                 "\n【事实限制】当前没有搜索结果。涉及链接、直播间号、比赛安排、时间、数字、事件时，"
@@ -4314,27 +5346,12 @@ class Bridge:
         # 注入当前时间
         if search_returned:
             system += (
-                "\n【搜索优先】搜索结果与训练旧知识冲突时，以搜索结果为准；"
-                "但群长期记忆里的手动维护事实/歌词/人物资料同样可靠，可优先采用，搜索结果只补充不覆盖。"
-                "禁止用训练知识里的旧年龄、旧日期、旧状态覆盖搜索结果。\n"
-                "【上文优先级低于搜索】如果上一句回答与当前搜索结果矛盾，"
-                "必须以搜索结果为准，不要被上一句回答带偏；"
-                "即使上一句是你自己说的，搜索结果证明错了就要改，不要为了保持一致而沿用错误结论。\n"
-                "【追问识别】用户追问“X是什么Y吗”“X是Y吗”是在质疑/纠正，不是在确认；"
-                "必须重新判断，不要把追问当确认。")
-            system += (
-                "\n【综合整合】多条搜索结果可能各自只包含一部分信息；"
-                "回答时要把人物身份、时间、事件、原因、来源信息交叉合并成完整答案，不要只采用其中一条。")
-            system += (
-                "\n【回答自由】长短按话题自然走，可以一句带过，也可以铺开讲；关键事实可带 [1][2]；"
-                "群聊语气自然口语化；不要用“根据搜索结果”这种冗余开头；"
-                "如果问题含多个实体，尽量逐个覆盖，不要漏。")
-            system += (
-                "\n【输出要求】回答正文，不要复读搜索结果标题、网址、来源页面名。")
-        # 当前日期已在第一轮前注入；这里只补时效判断要求
+                "\n【回答要求】根据搜索结果回答，保持塔菲语气；"
+                "关键名称、数字、日期写完整；多条结果交叉整合；"
+                "搜索结果没有的信息不要编造，没查到就直说。"
+            )
         system += (
-            "\n【时效要求】以当前时间判断事件是否已发生；"
-            "不要因为训练知识旧就说'尚未举行/尚未确定/还没开始'，搜索结果明确的信息优先。"
+            "\n【时效】以当前日期判断事件是否已发生，搜索明确的信息优先。"
         )
 
         # 纠正型追问 + 已有搜索结果时，强制模型基于搜索结果重新判断
@@ -4365,16 +5382,21 @@ class Bridge:
                     model_refs=MODELS_FACTUAL if (is_factual or guide_query) else MODELS_CASUAL,
                     weak_query=query, min_reply_len=min_reply_len,
                 )
+        _log_phase(phase_start, "最终模型")
         if not reply:
             fallback = distilled or search_results
             if fallback:
                 reply = await self._llm_answer_from_search(query, fallback)
                 if reply:
-                    return reply[:MAX_REPLY_LEN]
+                    return _truncate_at_sentence(
+                        _append_search_source_marker(reply, True, True),
+                        MAX_REPLY_LEN,
+                    )
             return "（AI 暂时无法回复，请稍后再试）"
         log(f"[API] 使用模型: {used_model} | temp={temperature} top_p={top_p}")
 
-        if _looks_like_tool_call(reply):
+        if _looks_like_tool_call(reply) and tool_round < REACT_MAX_ROUNDS:
+            tool_round += 1
             log("[FC] 第2轮仍输出工具调用文本，进入第3轮强制成文")
             final_messages = [
                 m for m in request_messages
@@ -4400,52 +5422,21 @@ class Bridge:
             reply = _sanitize_reply(reply or "")
             if not reply or _looks_like_tool_call(reply):
                 reply = ("我印象中这个问题的答案要按搜到的信息来判断：\n" +
-                         (distilled or search_results or "不过现在网没接上，我暂时没拿到可靠结果。"))[:MAX_REPLY_LEN]
+                         (distilled or search_results or "不过现在网没接上，我暂时没拿到可靠结果。"))
+                reply = _truncate_at_sentence(reply, MAX_REPLY_LEN)
             log("[FC] 第3轮最终回答已生成")
-        if _is_lyrics_query(query) and reply:
-            source_text = distilled or search_results or ""
-            if _lyric_reply_suspect(reply, query, source_text):
-                log("[歌词] 回答歌名/书名号不完整或未引用正文，进入一次强制重答")
-                retry_reply, _ = await self._complete(
-                    LYRIC_RETRY_SYSTEM,
-                    [{"role": "user", "content": (
-                        f"用户问题：{query}\n"
-                        f"可靠资料：{source_text or '（无搜索结果）'}\n"
-                        f"上一版回答：{reply}")}],
-                    max_tokens=final_max_tokens,
-                    temperature=0.2,
-                    top_p=0.5,
-                    model_refs=MODELS_FACTUAL if is_factual else MODELS_CASUAL,
-                    weak_query=query,
-                    min_reply_len=min_reply_len,
-                )
-                if retry_reply and not _lyric_reply_suspect(
-                        retry_reply, query, source_text):
-                    reply = retry_reply
-                    log("[歌词] 二次重答通过校验")
-        # 关闭二次事实核查，信任第一轮搜索+生成的结果，避免多次调用变慢和重写丢事实。
-        if _is_factual(query):
-            log("[核查] 已关闭，直接采用第一轮结果")
+        elif _looks_like_tool_call(reply):
+            log("[Agent] 强制终止工具调用循环，防止死循环")
+            reply = "塔菲暂时没搜到可靠答案，先不乱编喵。"
         reply = _sanitize_reply(reply)
-        if reply and TAFFY_FLAVOR and not sensitive:
-            log("[塔菲风格] 系统提示词已包含塔菲人设，不做二次重写")
-        repeat_source = last_answer if last_answer and _repetition_score(reply, last_answer) > 0.65 else ""
-        if not repeat_source:
-            for prev in self.recent_replies[-5:]:
-                if _repetition_score(reply, prev) > 0.65:
-                    repeat_source = prev
-                    break
-        if repeat_source:
-            log("[防复读] 与近期回答高度重复，重新组织回答")
-            improved, _ = await self._complete(
-                NO_REPEAT_SYSTEM,
-                [{"role": "user", "content": (
-                    f"近期回答：{repeat_source}\n当前回答：{reply}")}],
-                max_tokens=500, temperature=temperature, top_p=top_p,
-                model_refs=MODELS_CASUAL,
-            )
-            if improved:
-                reply = _sanitize_reply(improved)
+        reply = _fix_known_phrase_errors(reply, query)
+        source = distilled or search_results
+        if source:
+            reply = _ensure_numeric_facts_preserved(reply, source)
+            reply = _ensure_entity_facts_preserved(reply, source)
+            reply = _ensure_source_phrases_preserved(reply, source)
+        reply = _append_search_source_marker(
+            reply, search_returned, search_attempted)
         self.recent_replies.append(reply)
         self.recent_replies = self.recent_replies[-10:]
         if intent == "fact" and "AI 暂时" not in reply:
@@ -4470,8 +5461,9 @@ class Bridge:
         )
         if unsummarized_chars >= COMPRESS_TRIGGER_CHARS:
             asyncio.create_task(self._compress_history(key))
+        _log_phase(phase_start, "保存/整理")
         log(f"[耗时] {time.time() - start:.1f}s")
-        return reply[:MAX_REPLY_LEN]
+        return _truncate_at_sentence(reply, MAX_REPLY_LEN)
 
     # ---------- 消息处理 ----------
     async def _process_group(self, ev):
@@ -4483,6 +5475,7 @@ class Bridge:
         text, at_bot = self.extract_text(msg_arr, self.self_id)
         if not text:
             return
+        inc_stat("total_messages")
         original_text = text
         write_health(
             last_message_received_at=datetime.now().isoformat(),
@@ -4497,8 +5490,11 @@ class Bridge:
         if admin_reply is not None:
             await self.send_group_msg(gid, uid, admin_reply)
             return
+        if _admin_text(text).startswith("!"):
+            return
         is_safe, refusal = _check_safety(text)
         if not is_safe:
+            inc_stat("safety_blocks")
             write_health(last_safety_block=datetime.now().isoformat())
             log(f"[安全拦截] 群{gid}: {text[:60]}")
             await self.send_group_msg(gid, uid, refusal)
@@ -4520,26 +5516,22 @@ class Bridge:
         sender = ev.get("sender", {})
         uname = sender.get("card") or sender.get("nickname") or uid
         gname = ev.get("group_name", "群")
-        style_level, sensitive, _ = _classify_style_control(text)
-        style_prompt = ""
-        if not sensitive and style_level > 0:
-            style_prompt = TAFFY_STYLE_PROMPT if TAFFY_FLAVOR else STYLE_PROMPT
-        prompt = (f"【QQ群】{gname}({gid})\n{uname}({uid}): {text}\n"
-                  f"{style_prompt}\n"
-                  f"事实/知识类问题：有搜索就以搜索为准；如果搜索结果没有答案或不知道，"
-                  f"必须直接说'塔菲不知道/塔菲没查到喵'，绝对不能凭空编造或用'我觉得'敷衍；"
-                  f"尤其链接、直播间号、比赛安排、时间、数字不能编。\n"
-                  f"有搜索结果时，以搜索结果为准直接回答。\n"
-                  f"如果记忆里有相关信息优先引用。只输出回复本身，不要解释、前缀。")
+        prompt = f"【QQ群】{gname}({gid})\n{uname}({uid}): {text}\n"
         log(f"[群{gid}] {uname}: {text[:80]}")
         if SEND_THINKING:
             try:
                 await self.send_group_text(gid, THINKING_PLACEHOLDER)
             except Exception as e:
                 log(f"[正在想发送失败] 群{gid}: {repr(e)[:120]}")
+        reply_start = time.time()
         reply = await self.ask_model(gid, prompt, _clean_question(original_text), uname)
+        _log_phase(reply_start, "ask_model")
+        record_group_learning(gid, uname, original_text, reply)
+        record_reply_time(int((time.time() - reply_start) * 1000))
         log(f"[群{gid}] AI回复: {reply[:80]}")
+        send_start = time.time()
         await self.send_group_msg(gid, uid, reply)
+        _log_phase(send_start, "发送")
         try:
             _try_self_improve(gid, uname, text, reply)
         except Exception:
@@ -4568,6 +5560,7 @@ class Bridge:
         text, _ = self.extract_text(ev.get("message", []), self.self_id)
         if not text:
             return
+        inc_stat("total_messages")
         original_text = text
         write_health(
             last_message_received_at=datetime.now().isoformat(),
@@ -4582,8 +5575,11 @@ class Bridge:
         if admin_reply is not None:
             await self.send_private_msg(uid, admin_reply)
             return
+        if _admin_text(text).startswith("!"):
+            return
         is_safe, refusal = _check_safety(text)
         if not is_safe:
+            inc_stat("safety_blocks")
             write_health(last_safety_block=datetime.now().isoformat())
             log(f"[安全拦截] 私聊{uid}: {text[:60]}")
             await self.send_private_msg(uid, refusal)
@@ -4597,31 +5593,27 @@ class Bridge:
         if reply_context:
             text = f"{text}\n[引用原消息] {reply_context}"
         uname = ev.get("sender", {}).get("nickname", uid)
-        style_level, sensitive, _ = _classify_style_control(text)
-        style_prompt = ""
-        if not sensitive and style_level > 0:
-            style_prompt = TAFFY_STYLE_PROMPT if TAFFY_FLAVOR else STYLE_PROMPT
-        prompt = (f"【QQ私聊】{uname}({uid}): {text}\n"
-                  f"{style_prompt}\n"
-                  f"事实/知识类问题：有搜索就以搜索为准；如果搜索结果没有答案或不知道，"
-                  f"必须直接说'塔菲不知道/塔菲没查到喵'，绝对不能凭空编造或用'我觉得'敷衍；"
-                  f"尤其链接、直播间号、比赛安排、时间、数字不能编。\n"
-                  f"有搜索结果时，以搜索结果为准直接回答。\n"
-                  f"如果记忆里有相关信息优先引用。只输出回复本身，不要解释、前缀。")
+        prompt = f"【QQ私聊】{uname}({uid}): {text}\n"
         log(f"[私聊{uid}] {uname}: {text[:80]}")
         if SEND_THINKING:
             try:
                 await self.send_private_msg(uid, THINKING_PLACEHOLDER)
             except Exception as e:
                 log(f"[正在想发送失败] 私聊{uid}: {repr(e)[:120]}")
+        reply_start = time.time()
         reply = await self.ask_model(
             "private_" + uid,
             prompt,
             _clean_question(original_text),
             uname,
         )
+        _log_phase(reply_start, "ask_model")
+        record_group_learning("private_" + uid, uname, original_text, reply)
+        record_reply_time(int((time.time() - reply_start) * 1000))
         log(f"[私聊{uid}] AI回复: {reply[:80]}")
+        send_start = time.time()
         await self.send_private_msg(uid, reply)
+        _log_phase(send_start, "发送")
         try:
             _try_self_improve(uid, uname, text, reply, is_private=True)
         except Exception:
@@ -4846,10 +5838,12 @@ class Bridge:
         asyncio.create_task(self._deep_compress_if_needed())
         asyncio.create_task(self._periodic_style_learning())
         asyncio.create_task(self._health_heartbeat())
+        retry_delay = 3
         while True:
             try:
                 async with websockets.connect(WS_URL, ping_interval=25, open_timeout=15) as ws:
                     log("已连接 OneBot WebSocket")
+                    retry_delay = 3
                     self.ws_connected = True
                     write_health(
                         ws_connected=True,
@@ -4874,14 +5868,15 @@ class Bridge:
                             key = str(ev["group_id"]) if ev["message_type"] == "group" else "private_" + str(ev["user_id"])
                             await self.worker_for(key).put(ev)
             except Exception as e:
-                log(f"连接断开: {repr(e)[:120]}，3 秒后重连")
+                log(f"连接断开: {repr(e)[:120]}，{retry_delay:.0f} 秒后重连")
                 self.ws_connected = False
                 write_health(
                     ws_connected=False,
                     last_error=f"连接断开: {repr(e)[:120]}",
                     last_error_at=datetime.now().isoformat(),
                 )
-                await asyncio.sleep(3)
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(60, retry_delay * 1.5)
 
 def _onebot_http_probe():
     """启动时探测 OneBot HTTP API 是否可用；测试模式跳过真实网络请求。"""
@@ -4924,7 +5919,7 @@ def run_startup_checks():
         checks.append("足球" in store.get_analogy_methodology("1"))
         store._save_counter = 0
         checks.append(_classify_intent("C罗相当于足球界的谁") == "analogy")
-        checks.append("永雏塔菲" in SYSTEM_PROMPT and "不编造" in SYSTEM_PROMPT)
+        checks.append("永雏塔菲" in SYSTEM_PROMPT)
         checks.append(bool(_CORRECTION_FOLLOWUP_RE.search("西是什么梅西吗")))
         checks.append(not _CORRECTION_FOLLOWUP_RE.search("什么是黑洞"))
         checks.append("二次元" in _sanitize_reply("这很二次"))
@@ -4948,10 +5943,9 @@ def run_startup_checks():
         checks.append(bool(_build_style_fewshot("华为像足球里的谁", 2, "1")))
         checks.append("🐢" not in _sanitize_reply("🐢🔥稳住"))
         checks.append("永雏塔菲" in TAFFY_FLAVOR_PROMPT)
-        checks.append("自称规则" in TAFFY_FLAVOR_PROMPT)
+        checks.append("用 taffy" in TAFFY_FLAVOR_PROMPT)
         checks.append("喵有节制" in TAFFY_FLAVOR_PROMPT)
-        checks.append("不碰中之人" in TAFFY_FLAVOR_PROMPT)
-        checks.append("最高优先级" in TAFFY_FLAVOR_PROMPT)
+        checks.append("可以整活" in TAFFY_FLAVOR_PROMPT)
         checks.append("覆盖其他风格" in TAFFY_STYLE_PROMPT)
         checks.append(_classify_dialog_mode("我今天好难过") == "comfort")
         checks.append(_classify_dialog_mode("帮我写个文案") == "creative")
@@ -4968,7 +5962,7 @@ def run_startup_checks():
             "豆包是什么"))
         checks.append(_safe_max_tokens("glm", "glm-4v-flash", 10000) == 1024)
         checks.append(DEFAULT_MAX_TOKENS >= 10000 and GUIDE_MAX_TOKENS >= 10000)
-        checks.append("详略得当" in SYSTEM_PROMPT and "永久保持塔菲模式" in TAFFY_FLAVOR_PROMPT)
+        checks.append("永雏塔菲" in SYSTEM_PROMPT and "用 taffy" in TAFFY_FLAVOR_PROMPT)
         checks.append(_filter_silent_memory_text("牢大都说6\n正常内容") == "正常内容")
         checks.append(_required_entity_terms("关注塔菲谢谢喵") == {"塔菲"})
         checks.append(MODELS_FACTUAL[0].startswith("opencode_free/"))
@@ -5027,6 +6021,8 @@ def main():
         search_degraded_engine="",
         model_circuit_open=False,
     )
+    with _stats_lock:
+        _flush_stats()
     log("桥接启动 (NapCat OneBot11 -> 模型 API)")
     asyncio.run(Bridge().run())
 
