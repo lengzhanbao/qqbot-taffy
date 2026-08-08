@@ -3,7 +3,8 @@
 # - 调用 restart_bridge.py 启动桥接
 # - 若 NapCat 10 分钟内未起来，停止重试（避免无限日志）
 
-$log = '<项目根>\boot_start_bridge.log'
+$root = $PSScriptRoot
+$log = Join-Path $root 'boot_start_bridge.log'
 $stop = $false
 try {
     $script:logStream = [System.IO.StreamWriter]::new($log, $true, [System.Text.Encoding]::UTF8)
@@ -24,7 +25,7 @@ Out "=== 开机启动 QQ 桥接 ==="
 $napcatProc = Get-Process -Name NapCatWinBootMain -ErrorAction SilentlyContinue
 if (-not $napcatProc) {
     Out "[1/3] 启动 NapCat..."
-    $bat = '<项目根>\shell\launch_napcat.bat'
+    $bat = Join-Path $root 'shell\launch_napcat.bat'
     if (Test-Path $bat) {
         Start-Process -FilePath $bat -WindowStyle Hidden
     } else {
@@ -54,11 +55,15 @@ if (-not $ready) {
 
 # 3) 启动桥接
 Out "[3/3] 启动桥接 (restart_bridge.py)..."
-$pyw = '<用户目录>\AppData\Local\Programs\Python\Python311\pythonw.exe'
-$script = '<项目根>\restart_bridge_hidden.py'
+$pyw = $env:PYTHONW
+if (-not $pyw) {
+    $pyw = (Get-Command pythonw -ErrorAction SilentlyContinue).Source
+}
+if (-not $pyw) { $pyw = 'pythonw' }
+$script = Join-Path $root 'restart_bridge_hidden.py'
 if (-not (Test-Path $pyw)) { $pyw = 'pythonw' }
 try {
-    $p = Start-Process -FilePath $pyw -ArgumentList @($script) -WorkingDirectory '<项目根>' -WindowStyle Hidden -PassThru
+    $p = Start-Process -FilePath $pyw -ArgumentList @($script) -WorkingDirectory $root -WindowStyle Hidden -PassThru
     Out "  已触发 (PID $($p.Id))"
 } catch {
     Out "  启动失败: $_"

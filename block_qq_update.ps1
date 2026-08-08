@@ -1,5 +1,5 @@
 ﻿# 屏蔽 QQ 自动更新下载域名（防止 QQ 更新破坏 NapCat 兼容性）
-$log = '<项目根>\hosts_out.log'
+$log = Join-Path $PSScriptRoot 'hosts_out.log'
 Start-Transcript -Path $log -Force | Out-Null
 Write-Output "=== 添加 hosts 屏蔽 $(Get-Date -Format 'HH:mm:ss') ==="
 $hosts = 'C:\Windows\System32\drivers\etc\hosts'

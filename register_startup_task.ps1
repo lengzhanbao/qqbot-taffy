@@ -1,5 +1,6 @@
 # Register QQ-Bridge-StartOnBoot (user-level, no admin needed)
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File <项目根>\start_bridge_on_boot.ps1'
+$bridgeScript = Join-Path $PSScriptRoot 'start_bridge_on_boot.ps1'
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$bridgeScript`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $trigger.Delay = 'PT2M'
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited

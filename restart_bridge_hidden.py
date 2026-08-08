@@ -5,9 +5,13 @@ import subprocess
 import sys
 import time
 
-PYTHONW = r"<用户目录>\AppData\Local\Programs\Python\Python311\pythonw.exe"
-BRIDGE = r"<项目根>\bridge_qq.py"
-WORKDIR = r"<项目根>"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PYTHONW = os.environ.get(
+    "PYTHONW",
+    sys.executable.replace("python.exe", "pythonw.exe"),
+)
+BRIDGE = os.path.join(BASE_DIR, "bridge_qq.py")
+WORKDIR = BASE_DIR
 LOG_FILE = os.path.join(WORKDIR, "logs", "restart_hidden.log")
 CREATE_NO_WINDOW = 0x08000000
 DETACHED_PROCESS = 0x00000008

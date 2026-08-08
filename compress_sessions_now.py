@@ -5,8 +5,10 @@ import importlib.util
 import os
 import sys
 
-sys.path.insert(0, r"<项目根>")
-spec = importlib.util.spec_from_file_location("bridge_qq", r"<项目根>\bridge_qq.py")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE_DIR)
+spec = importlib.util.spec_from_file_location(
+    "bridge_qq", os.path.join(BASE_DIR, "bridge_qq.py"))
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
