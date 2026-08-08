@@ -6,11 +6,17 @@ class TestMarkdown:
     def test_remove_bold(self):
         assert "**" not in _sanitize_reply("**你好**")
 
+    def test_remove_unmatched_bold(self):
+        assert "**" not in _sanitize_reply("就是指**南京玄武湖附近")
+
     def test_remove_italic(self):
         assert "*" not in _sanitize_reply("*斜体*")
 
     def test_remove_backtick(self):
         assert "`" not in _sanitize_reply("`代码`")
+
+    def test_remove_unmatched_backtick(self):
+        assert "`" not in _sanitize_reply("玄武口音就是`南京附近")
 
     def test_remove_underscore(self):
         assert "__" not in _sanitize_reply("__重点__")

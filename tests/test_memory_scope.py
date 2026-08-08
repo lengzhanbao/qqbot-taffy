@@ -1,4 +1,5 @@
 import bridge_qq
+import qqbot_core.config as config
 
 
 def test_scoped_private_memory_does_not_leak_group_memory():
@@ -59,3 +60,14 @@ def test_question_or_quote_is_not_written_as_memory():
 
 def test_group_style_is_memory_only_not_long_term_prompt():
     assert not bridge_qq._should_inject_group_style("900000002", "今晚有什么比赛吗")
+
+
+def test_memory_file_cache_reads_and_refreshes(monkeypatch, tmp_path):
+    memory_file = tmp_path / "bot_memory.md"
+    memory_file.write_text("# Bot Memory\n\n- 塔菲\n", encoding="utf-8")
+    monkeypatch.setattr(config, "MEMORY_FILE", str(memory_file))
+    config._MEMORY_CACHE.update({"content": "", "mtime": 0.0})
+
+    assert config._read_memory_file_cached() == "# Bot Memory\n\n- 塔菲\n"
+    memory_file.write_text("# Bot Memory\n\n- 塔菲更新\n", encoding="utf-8")
+    assert "塔菲更新" in config._read_memory_file_cached()

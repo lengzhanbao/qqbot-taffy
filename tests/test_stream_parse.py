@@ -17,6 +17,19 @@ class TestStreamParse:
         assert finish_reason == "length"
         assert web_search == []
 
+    def test_json_content_tool_call_text_is_recovered(self):
+        lines = [
+            '{"choices":[{"message":{"content":"{\\"queries\\":[{\\"query\\":\\"2026世界杯 冠军\\",\\"purpose\\":\\"冠军\\"}]}"},"finish_reason":"stop"}]}'
+        ]
+        content, state, tool_calls, finish_reason, _ = (
+            _bridge()._parse_stream_response(lines))
+        assert content == ""
+        assert state == "ok"
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "plan_search"
+        assert "2026世界杯 冠军" in tool_calls[0]["function"]["arguments"]
+        assert finish_reason == "stop"
+
     def test_streaming_content_chunks_are_joined(self):
         lines = [
             'data: {"choices":[{"delta":{"content":"你"}}]}',

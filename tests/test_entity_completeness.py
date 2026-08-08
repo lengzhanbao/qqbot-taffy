@@ -26,3 +26,18 @@ class TestMissingTerms:
     def test_rock_kingdom_full_name_passes(self):
         reply = "洛克王国世界草系徽章要先完成草系道馆挑战，再去徽章密室击败守护精灵，成功拿到草系徽章才算解锁。"
         assert _reply_missing_entities(reply, "洛克王国世界草系徽章怎么弄") == []
+
+    def test_rock_kingdom_partial_name_is_detected(self):
+        missing = _reply_missing_entities("洛克王国草系徽章怎么拿", "洛克王国世界草系徽章怎么弄")
+        assert any("世界" in term for term in missing)
+
+    def test_rock_kingdom_colon_variant_passes(self):
+        assert _reply_missing_entities(
+            "《洛克王国：世界》是腾讯魔方工作室开发的",
+            "洛克王国世界呢",
+        ) == []
+        missing = _reply_missing_entities(
+            "洛克王国",
+            "洛克王国世界呢",
+        )
+        assert any("世界" in term for term in missing)
