@@ -1,4 +1,4 @@
-﻿# QQBot 项目恢复：只从 <项目根>\backups 读取，恢复前自动备份当前文件。
+﻿# QQBot 项目恢复：只从 项目根目录 backups/ 读取，恢复前自动备份当前文件。
 param(
     [string]$BackupPath = ""
 )

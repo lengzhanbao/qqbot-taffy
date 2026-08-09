@@ -1,4 +1,4 @@
-# 开机启动 QQ 桥接 (<项目根>\start_bridge_on_boot.ps1)
+﻿# 开机启动 QQ 桥接 (start_bridge_on_boot.ps1)
 # - 等 NapCat OneBot WebSocket 端口 3001 就绪（QQ 登录后才起）
 # - 调用 restart_bridge.py 启动桥接
 # - 若 NapCat 10 分钟内未起来，停止重试（避免无限日志）

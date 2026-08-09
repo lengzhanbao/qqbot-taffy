@@ -1,4 +1,4 @@
-﻿# NapCat 重启脚本（<项目根>）
+﻿# NapCat 重启脚本（项目根目录）
 $root = $PSScriptRoot
 $log = Join-Path $root 'restart_out.log'
 Start-Transcript -Path $log -Force | Out-Null

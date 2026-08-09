@@ -1,4 +1,4 @@
-﻿# QQBot 项目备份：所有备份都放在 <项目根>\backups，不写 C 盘。
+﻿# QQBot 项目备份：所有备份都放在 项目根目录 backups/，不写 C 盘。
 param(
     [string]$Tag = ""
 )

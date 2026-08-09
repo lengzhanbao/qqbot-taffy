@@ -6,16 +6,16 @@
 
 - `bridge_qq.py`：主桥接，NapCat WebSocket 到模型 API
 - `qqbot_core/`：模块化核心包，目前包含 stats、safety、learning
-- `scripts/backup.ps1`：备份项目关键文件到 `<项目根>\backups`
-- `scripts/restore.ps1`：从 `<项目根>\backups` 恢复，恢复前自动备份当前文件
-- `scripts/status.ps1`：读取 `<项目根>\data\health.json` 查看机器人健康状态
+- `scripts/backup.ps1`：备份项目关键文件到 `backups/`
+- `scripts/restore.ps1`：从 `backups/` 恢复，恢复前自动备份当前文件
+- `scripts/status.ps1`：读取 `data/health.json` 查看机器人健康状态
 - `docs/public/`：可进入 Git 的脱敏文档
 - `docs/`：本地计划、学习记录、Prompt 文档、问答对照等资料，不进入 Git
 - `config/.env.example`：环境变量示例，真实 `.env` 在项目根目录
 - `tests/`：pytest 测试
 - `demo/`：脱敏 demo 说明与构建产物
-- `backups/`：所有备份，全部在 E 盘
-- `AGENTS.md`：项目级约束，包含 E 盘存储和删除确认规则
+- `backups/`：所有备份
+- `AGENTS.md`：项目级约束，包含存储和删除确认规则
 
 详细文档：
 
@@ -30,17 +30,16 @@
 
 ## 存储约定
 
-所有项目运行数据和备份都放在 E 盘：
+所有项目运行数据和备份都放在项目根目录：
 
-- 项目根目录：`<项目根>`
-- 会话：`<项目根>\data\bridge_sessions.json`
-- 长期记忆：`<项目根>\data\bot_memory.md`
-- 群风格画像：`<项目根>\data\group_profiles.json`
-- 日志：`<项目根>\logs\bridge.log`
-- 健康状态：`<项目根>\data\health.json`
-- 运行统计：`<项目根>\data\stats.json`
-- 临时自检文件：`<项目根>\.tmp`
-- 备份：`<项目根>\backups`
+- 会话：`data/bridge_sessions.json`
+- 长期记忆：`data/bot_memory.md`
+- 群风格画像：`data/group_profiles.json`
+- 日志：`logs/bridge.log`
+- 健康状态：`data/health.json`
+- 运行统计：`data/stats.json`
+- 临时自检文件：`.tmp`
+- 备份：`backups/`
 
 ## 隐私边界
 
@@ -103,7 +102,7 @@ python scripts/test_meme_search.py
 查看：
 
 ```powershell
-Get-Content -Raw -Encoding UTF8 <项目根>\data\stats.json
+Get-Content -Raw -Encoding UTF8 data\stats.json
 ```
 
 ## 回答来源标注
@@ -130,16 +129,16 @@ Get-Content -Raw -Encoding UTF8 <项目根>\data\stats.json
 
 ```powershell
 # 备份
-powershell -ExecutionPolicy Bypass -File <项目根>\scripts\backup.ps1 -Tag manual
+powershell -ExecutionPolicy Bypass -File scripts\backup.ps1 -Tag manual
 
 # 列出并选择备份
-powershell -ExecutionPolicy Bypass -File <项目根>\scripts\restore.ps1
+powershell -ExecutionPolicy Bypass -File scripts\restore.ps1
 
 # 指定备份目录恢复
-powershell -ExecutionPolicy Bypass -File <项目根>\scripts\restore.ps1 -BackupPath <项目根>\backups\20260807_160000_manual
+powershell -ExecutionPolicy Bypass -File scripts\restore.ps1 -BackupPath backups\20260807_160000_manual
 
 # 查看健康状态
-powershell -ExecutionPolicy Bypass -File <项目根>\scripts\status.ps1
+powershell -ExecutionPolicy Bypass -File scripts\status.ps1
 ```
 
-恢复前脚本会自动停止检查：如果桥接进程还在运行会拒绝执行。恢复前也会先把当前文件备份到 `<项目根>\backups\before_restore_时间戳`。
+恢复前脚本会自动停止检查：如果桥接进程还在运行会拒绝执行。恢复前也会先把当前文件备份到 `backups/before_restore_时间戳`。

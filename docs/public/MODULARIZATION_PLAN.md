@@ -1,4 +1,4 @@
-# QQBot 模块拆分计划
+﻿# QQBot 模块拆分计划
 
 > 状态：计划阶段，未执行  
 > 目标：在不改变运行行为的前提下，把 6000+ 行的 `bridge_qq.py` 拆成职责清晰的模块，并让 Git 提交可回滚、可部署、可面试讲解
@@ -115,7 +115,7 @@ for _name in dir(_b):
 ## 三、目标结构
 
 ```text
-<项目根>\
+项目根目录/
 ├── bridge_qq.py                  # 兼容入口 + Bridge 主流程，尽量瘦身
 ├── requirements.txt              # 运行依赖
 ├── requirements-dev.txt          # 测试依赖

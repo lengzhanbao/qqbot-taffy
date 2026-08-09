@@ -1,4 +1,4 @@
-# QQBot 模块职责导览
+﻿# QQBot 模块职责导览
 
 > 完整函数清单见 [MODULE_FUNCTIONS.md](MODULE_FUNCTIONS.md)  
 > 这里按模块和功能组解释每个函数大致做什么。
@@ -9,7 +9,7 @@
 
 负责全局配置和路径。
 
-- `_runtime_tmp_path(name)`：返回 `<项目根>\.tmp\name`，并确保目录存在。
+- `_runtime_tmp_path(name)`：返回 `项目根目录 .tmp/name`，并确保目录存在。
 - `_read_memory_file_cached()`：带缓存读取 `bot_memory.md`。
 - `_load_env_file()`：加载项目根目录 `.env`。
 

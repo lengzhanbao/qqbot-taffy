@@ -5,7 +5,7 @@
 ## 构建
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File <项目根>\scripts\build_demo.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_demo.ps1
 ```
 
 生成目录：
