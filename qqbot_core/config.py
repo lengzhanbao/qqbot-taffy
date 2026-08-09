@@ -103,6 +103,7 @@ REFLECTION_ENABLED = os.environ.get("QQ_REFLECTION", "0") == "1"
 THINKING_PLACEHOLDER = "正在想..."
 SEND_THINKING = os.environ.get("QQ_SEND_THINKING", "1") == "1"
 ALWAYS_SEARCH = os.environ.get("QQ_ALWAYS_SEARCH", "0") == "1"
+ENABLE_GENERATED_MEMORY = os.environ.get("QQ_GENERATED_MEMORY", "0") == "1"
 MAX_SEARCH_RESULTS = 10
 try:
     MAX_SEARCH_CHARS = int(os.environ.get("QQ_MAX_SEARCH_CHARS", "6000"))

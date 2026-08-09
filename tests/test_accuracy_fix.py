@@ -97,6 +97,19 @@ def test_free_models_are_prioritized():
     assert bridge_qq.MODELS_CASUAL[0].startswith("opencode_free/")
 
 
+def test_generated_memory_disabled_by_default():
+    assert bridge_qq.ENABLE_GENERATED_MEMORY is False
+
+
+def test_bin_fmvp_false_statement_cleaned():
+    fixed = bridge_qq._fix_known_phrase_errors(
+        "Bin是S13世界赛FMVP，也是S13夺冠大佬", "bin"
+    )
+    assert "S13世界赛FMVP" not in fixed
+    assert "S13夺冠大佬" not in fixed
+    assert "职业上单" in fixed
+
+
 def test_search_strategy_prompt_is_simple_without_hard_content_limits():
     text = bridge_qq.SEARCH_STRATEGY_SYSTEM
     assert "需要联网时" in text

@@ -295,6 +295,12 @@ _LEGACY_POLLUTION_TABLE = [
     ("网路黑话", "网络黑话"),
     ("离BLG渣了", "离开BLG"),
     ("文件!", ""),
+    ("S13世界赛FMVP", "职业上单"),
+    ("S13夺冠大佬", "知名职业上单"),
+    ("某条错误陈述", "某条正确陈述"),
+    ("经过与队伍沟通后，决定，感谢队伍和队友", "经过与队伍沟通后，决定暂时离开赛场休息调整，感谢队伍和队友"),
+    ("某处缺字", "某处已补全"),
+    ("Bin哥休归来再杀疯", "Bin哥休整归来再杀疯"),
 ]
 
 
@@ -399,20 +405,15 @@ def _sanitize_history_content(content, role="assistant"):
                 fallback = _person_bio_fallback_reply(person_key)
                 if fallback:
                     return fallback
-        if (
-            _has_repeated_long_phrase(content)
-            or _looks_garbled_reply(content)
-        ):
-            if _recommendation_category(content):
-                fallback = _recommendation_fallback_reply(content)
-                if fallback:
-                    return fallback
-            if re.search(
-                r"选手|厂长|viper|meiko|faker|rookie|theshy|介绍",
-                content,
-                re.IGNORECASE,
-            ):
-                return _refine_polluted_history(content)
+    if (
+        _has_repeated_long_phrase(content)
+        or _looks_garbled_reply(content)
+    ):
+        if _recommendation_category(content):
+            fallback = _recommendation_fallback_reply(content)
+            if fallback:
+                return fallback
+        content = _refine_polluted_history(content)
     if "推荐系统" in content:
         content = content.replace("推荐系统", "推荐内容")
         content = content.replace("推荐系统入门教程", "可靠推荐内容")
@@ -4306,6 +4307,8 @@ _memory_lock = threading.Lock()
 
 def _try_self_improve(key, uname, user_text, bot_reply, is_private=False):
     """检测纠正和新的时效事实，自动追加到 bot_memory.md"""
+    if not ENABLE_GENERATED_MEMORY:
+        return
     section = f"## 私聊 {key}" if is_private else f"## 群 {key}"
     candidates = []
     for marker in CORRECTION_MARKERS:
@@ -5905,7 +5908,8 @@ class Bridge:
             await self.send_group_msg(gid, uid, refusal)
             return
         try:
-            self.style_store.learn(gid, text, uid)
+            if ENABLE_GENERATED_MEMORY:
+                self.style_store.learn(gid, text, uid)
         except Exception:
             pass
         if TRIGGER == "at" and not at_bot:
@@ -5931,7 +5935,8 @@ class Bridge:
         reply_start = time.time()
         reply = await self.ask_model(gid, prompt, _clean_question(original_text), uname)
         _log_phase(reply_start, "ask_model")
-        record_group_learning(gid, uname, original_text, reply)
+        if ENABLE_GENERATED_MEMORY:
+            record_group_learning(gid, uname, original_text, reply)
         record_reply_time(int((time.time() - reply_start) * 1000))
         log(f"[群{gid}] AI回复: {reply[:80]}")
         send_start = time.time()
@@ -5943,9 +5948,9 @@ class Bridge:
             pass
         try:
             history_len = len((self.sessions.get(gid) or {}).get("messages") or [])
-            if history_len and history_len % 20 == 0:
+            if ENABLE_GENERATED_MEMORY and history_len and history_len % 20 == 0:
                 asyncio.create_task(self._learn_group_history(gid))
-            if history_len and history_len % 50 == 0:
+            if ENABLE_GENERATED_MEMORY and history_len and history_len % 50 == 0:
                 asyncio.create_task(self._learn_analogy_methodology(gid))
                 messages = (self.sessions.get(gid) or {}).get("messages") or []
                 recent_texts = [
@@ -6013,7 +6018,8 @@ class Bridge:
             uname,
         )
         _log_phase(reply_start, "ask_model")
-        record_group_learning("private_" + uid, uname, original_text, reply)
+        if ENABLE_GENERATED_MEMORY:
+            record_group_learning("private_" + uid, uname, original_text, reply)
         record_reply_time(int((time.time() - reply_start) * 1000))
         log(f"[私聊{uid}] AI回复: {reply[:80]}")
         send_start = time.time()
@@ -6106,6 +6112,8 @@ class Bridge:
             log(f"[存储] 深度压缩异常: {repr(e)[:120]}")
     async def _learn_group_history(self, key):
         """从群历史中学习值得长期记住的信息，写入 bot_memory.md。"""
+        if not ENABLE_GENERATED_MEMORY:
+            return
         try:
             store = self.sessions.get(key)
             if not isinstance(store, dict):
@@ -6155,6 +6163,8 @@ class Bridge:
             log(f"[群学习] {key} 失败: {repr(e)[:100]}")
 
     async def _learn_analogy_methodology(self, key):
+        if not ENABLE_GENERATED_MEMORY:
+            return
         try:
             store = self.sessions.get(key)
             if not isinstance(store, dict):
