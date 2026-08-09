@@ -131,6 +131,10 @@ Essential options:
 - No results: broaden query or remove time filters
 - Timeout: retry after a moment
 - Rate limiting: space out searches
+- For unstable connections, `scripts/search.py` now uses the no-token
+  `html.duckduckgo.com/html/` and `lite.duckduckgo.com/lite/` endpoints
+  concurrently, decodes `uddg=` redirect URLs, and falls back from `cn-zh`
+  to `wt-wt`. Use `--timeout` and `--retries` to tune slow networks.
 
 ## Resources
 

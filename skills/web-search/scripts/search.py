@@ -3,8 +3,22 @@
 """DuckDuckGo web search CLI compatible with the web-search skill."""
 
 import argparse
+import concurrent.futures
 import json
+import re
 import sys
+import time
+from urllib.parse import parse_qs, unquote, urlparse
+
+try:
+    import requests
+except Exception:
+    requests = None
+
+try:
+    from bs4 import BeautifulSoup
+except Exception:
+    BeautifulSoup = None
 
 try:
     from ddgs import DDGS
@@ -15,10 +29,168 @@ except Exception:
         DDGS = None
 
 
+DDG_HTML_URL = "https://html.duckduckgo.com/html/"
+DDG_LITE_URL = "https://lite.duckduckgo.com/lite/"
+DDG_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
 def _output_stream(path):
     if path:
         return open(path, "w", encoding="utf-8")
     return sys.stdout
+
+
+def _decode_ddg_href(href):
+    """Decode DuckDuckGo /l/?uddg= redirect links to the real URL."""
+    try:
+        query = parse_qs(urlparse(href or "").query)
+        raw = query.get("uddg")
+        if raw:
+            return unquote(raw[0])
+    except Exception:
+        pass
+    return href or ""
+
+
+def _parse_ddg_html(html_text):
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    rows = soup.select(".result")
+    out = []
+    for row in rows:
+        link = row.select_one("a.result__a")
+        if not link:
+            continue
+        title = link.get_text(" ", strip=True)
+        snippet_el = row.select_one(".result__snippet")
+        body = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+        if title:
+            out.append({
+                "title": title,
+                "href": _decode_ddg_href(link.get("href") or ""),
+                "body": body,
+            })
+    if out:
+        return out
+    for link in soup.select("a[href*='uddg=']"):
+        title = link.get_text(" ", strip=True)
+        if not title:
+            continue
+        snippet_el = link.find_next(
+            attrs={"class": ["result__snippet", "snippet"]}
+        )
+        out.append({
+            "title": title,
+            "href": _decode_ddg_href(link.get("href") or ""),
+            "body": snippet_el.get_text(" ", strip=True) if snippet_el else "",
+        })
+    return out
+
+
+def _parse_ddg_lite(html_text):
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    out = []
+    for row in soup.select("table.result, .result, .web-result"):
+        link = row.select_one("a.result-link") or row.select_one("a")
+        if not link:
+            continue
+        title = link.get_text(" ", strip=True)
+        snippet_el = row.select_one(".result-snippet") or row.select_one(
+            "td.result-snippet"
+        )
+        if title:
+            out.append({
+                "title": title,
+                "href": _decode_ddg_href(link.get("href") or ""),
+                "body": snippet_el.get_text(" ", strip=True)
+                if snippet_el else "",
+            })
+    return out
+
+
+def _fetch_ddg_serp(query, region, max_results, timeout, kind):
+    if requests is None or BeautifulSoup is None:
+        return []
+    per_request_timeout = max(1.0, min(float(timeout), 8.0))
+    if kind == "lite":
+        resp = requests.get(
+            DDG_LITE_URL,
+            params={"q": query, "kl": region},
+            headers=DDG_HEADERS,
+            timeout=per_request_timeout,
+        )
+    else:
+        resp = requests.post(
+            DDG_HTML_URL,
+            data={"q": query, "kl": region},
+            headers=DDG_HEADERS,
+            timeout=per_request_timeout,
+        )
+    if resp.status_code in (202, 403, 429):
+        return []
+    if not resp.ok:
+        return []
+    rows = _parse_ddg_lite(resp.text) if kind == "lite" else _parse_ddg_html(
+        resp.text
+    )
+    return rows[:max_results]
+
+
+def _search_ddg_stable(
+    query, region="wt-wt", max_results=10, timeout=10, retries=1
+):
+    """DuckDuckGo without token: try HTML and Lite concurrently, then fall back."""
+    if requests is None or BeautifulSoup is None:
+        return []
+    seen = set()
+    out = []
+    regions = [region] if region in ("", None) else [region, "wt-wt"]
+    if region != "wt-wt":
+        regions = list(dict.fromkeys([region, "wt-wt"]))
+    deadline = time.monotonic() + max(1.0, min(float(timeout), 12.0))
+    attempts = max(1, int(retries or 1))
+    for _ in range(attempts):
+        if time.monotonic() >= deadline:
+            break
+        for region_try in regions:
+            if time.monotonic() >= deadline:
+                break
+            remaining = max(1.0, deadline - time.monotonic())
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(
+                        _fetch_ddg_serp,
+                        query,
+                        region_try,
+                        max_results,
+                        remaining,
+                        kind,
+                    )
+                    for kind in ("html", "lite")
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        rows = future.result() or []
+                    except Exception:
+                        rows = []
+                    for row in rows:
+                        key = re.sub(r"\W+", "", (row.get("title") or "").lower())
+                        if not key or key in seen:
+                            continue
+                        seen.add(key)
+                        out.append(row)
+                    if len(out) >= max_results:
+                        return out[:max_results]
+            if out:
+                return out[:max_results]
+        if out:
+            return out[:max_results]
+    return out[:max_results]
 
 
 def _normalize(results, search_type):
@@ -102,6 +274,15 @@ def _format_markdown(rows, search_type):
 
 
 def _run_search(args):
+    if args.type == "web":
+        raw = _search_ddg_stable(
+            args.query,
+            region=args.region,
+            max_results=args.max_results,
+            timeout=args.timeout,
+            retries=args.retries,
+        )
+        return _normalize(raw, "web")
     if DDGS is None:
         raise RuntimeError(
             "Missing required dependency. Run: pip install duckduckgo-search"
@@ -113,10 +294,8 @@ def _run_search(args):
     }
     if args.time_range:
         kwargs["timelimit"] = args.time_range
-    with DDGS() as ddgs:
-        if args.type == "web":
-            raw = ddgs.text(args.query, **kwargs)
-        elif args.type == "news":
+    with DDGS(timeout=args.timeout) as ddgs:
+        if args.type == "news":
             raw = ddgs.news(args.query, **kwargs)
         elif args.type == "images":
             raw = ddgs.images(
@@ -151,6 +330,8 @@ def _parse_args(argv):
     parser.add_argument("--time-range", choices=("d", "w", "m", "y"), default=None)
     parser.add_argument("-r", "--region", default="wt-wt")
     parser.add_argument("--safe-search", choices=("on", "moderate", "off"), default="moderate")
+    parser.add_argument("--timeout", type=float, default=10)
+    parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("-f", "--format", choices=("text", "markdown", "json"), default="text")
     parser.add_argument("-o", "--output", default=None)
     parser.add_argument("--image-size", default=None)

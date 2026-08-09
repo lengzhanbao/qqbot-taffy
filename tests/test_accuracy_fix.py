@@ -84,6 +84,7 @@ def test_exact_search_skips_local_variant_builder(monkeypatch):
     monkeypatch.setattr(bridge_qq, "_build_search_variants", boom)
     monkeypatch.setattr(bridge_qq, "_search_engine", lambda *a, **k: [])
     monkeypatch.setattr(bridge_qq, "_drission_search_html", lambda *a, **k: "")
+    monkeypatch.setattr(bridge_qq, "_search_duckduckgo", lambda *a, **k: [])
 
     result = asyncio.run(bridge_qq.search_web_async(
         "梅西C罗年龄", max_results=2, exact=True))
@@ -96,13 +97,14 @@ def test_free_models_are_prioritized():
     assert bridge_qq.MODELS_CASUAL[0].startswith("opencode_free/")
 
 
-def test_search_strategy_prompt_is_simple_and_prefers_cn_bing():
+def test_search_strategy_prompt_is_simple_without_hard_content_limits():
     text = bridge_qq.SEARCH_STRATEGY_SYSTEM
     assert "需要联网时" in text
     assert "调用搜索工具" in text
-    assert "cn.bing" in text
-    assert "不要优先百度百科" in text
     assert "按搜索结果回答" in text
+    assert "不要包含 Markdown" in text
+    assert "必须" not in text
+    assert "禁止" not in text
 
 
 def test_search_tool_fewshot_encourages_multiple_queries():
@@ -212,6 +214,18 @@ def test_any_search_prefers_suggest_and_sogou():
         max_chars=500,
     )
     assert distilled.startswith("百度建议")
+
+
+def test_search_suggestion_only_is_not_search_evidence():
+    raw = "【百度建议】张雪峰 武亮\n【搜狗提示】张雪峰 教育\n"
+    assert bridge_qq._search_evidence_text(raw) == ""
+    assert bridge_qq._distill_search_results(
+        bridge_qq._search_evidence_text(raw), "张雪峰 武亮"
+    ) == ""
+    mixed = raw + "【张雪峰】峰学蔚来创始人\n"
+    evidence = bridge_qq._search_evidence_text(mixed)
+    assert "峰学蔚来" in evidence
+    assert "百度建议" not in evidence
 
 
 def test_lyric_intent_is_not_creative_mode():
@@ -379,6 +393,21 @@ def test_source_phrase_preservation_fixes_jiejie():
     assert "同年上调至EDG一队" in reply
 
 
+def test_pathological_repetition_is_cleaned_from_history_and_reply():
+    polluted = (
+        "爆料圣枪哥加入BLG被曝加入BLG加入BLG官方"
+        "爆料圣枪哥加入BLG被曝加入BLG加入BLG官方"
+        "爆料圣枪哥加入BLG被曝加入BLG加入BLG官方"
+    )
+    assert bridge_qq._has_pathological_repetition(polluted)
+    cleaned = bridge_qq._clean_pathological_repetition(polluted)
+    assert not bridge_qq._has_pathological_repetition(cleaned)
+    sanitized = bridge_qq._sanitize_history_content(polluted, "assistant")
+    assert not bridge_qq._has_pathological_repetition(sanitized)
+    sanitized_user = bridge_qq._sanitize_history_content(polluted, "user")
+    assert not bridge_qq._has_pathological_repetition(sanitized_user)
+
+
 def test_song_recommendation_exact_names():
     assert bridge_qq._is_song_recommendation_query("我要听歌喵")
     assert bridge_qq._is_song_recommendation_query("推荐几首新歌")
@@ -424,6 +453,9 @@ def test_search_query_clean_and_tool_residue():
         '{"queries": ["日本央行 加息"]}')
     assert bridge_qq._looks_like_tool_call(
         '{"query": "NVIDIA market cap", "recency_days": 30}')
+    assert bridge_qq._looks_like_tool_call(
+        '搜索中...\n```json\n'
+        '{"query": "高考志愿填报 选专业", "count": 8, "source": "cn.bing"}\n```')
     assert bridge_qq._is_weak_reply(
         "塔菲再搜一下最新数据！", "英伟达市值")
 
@@ -565,6 +597,25 @@ def test_self_check_trigger_for_garbled_person_reply():
         "那viper呢",
         "厂长明凯是EDG传奇打野",
     )
+
+
+def test_pathological_repetition_catches_interleaved_source_phrase():
+    reply = (
+        "圣枪哥来了！官方真的BLG了。"
+        "爆料圣枪哥来了！官方加圣枪哥来了！官方被曝圣枪哥来了！官方又改口。"
+    )
+    assert bridge_qq._has_pathological_repetition(reply)
+
+
+def test_garbled_date_patterns_are_detected():
+    assert bridge_qq._looks_garbled_reply("周杰伦《七里香》是2003年,4年发行")
+    assert bridge_qq._looks_garbled_reply("周杰伦《七里香》是2003年，4年发行")
+    assert bridge_qq._looks_garbled_reply("2026年6月14日24日6年7月24日")
+
+
+def test_fix_known_phrase_errors_fixes_wufu_typo():
+    fixed = bridge_qq._fix_known_phrase_errors("玄歯口音这个梗", "玄武口音")
+    assert "玄武口音" in fixed
 
 
 def test_answer_contract_generic_checks():
@@ -731,6 +782,96 @@ def test_generic_fallback_query_uses_llm_friendly_meme_query():
         "我是说的梗曼波小马") == "曼波小马 梗"
     assert bridge_qq._needs_search("介绍一下曼波")
     assert bridge_qq._needs_search("我是说的梗曼波小马")
+
+
+def test_search_query_splits_person_connectors_and_removes_small_talk():
+    assert bridge_qq._build_search_query(
+        "如何评价张雪峰和武亮") == "张雪峰 武亮"
+    assert bridge_qq._generic_fallback_query(
+        "我问的是卖网课张雪峰老师我还记得你和武亮是他徒弟"
+    ) == "张雪峰 武亮 网课"
+
+
+def test_repeated_search_snippet_triggers_self_check():
+    bad = (
+        "教育界顶流博微博知名教育博主张雪峰老师的微博主页博_微博"
+        "原江苏省人大代表本名张子彪去世4个月" * 3
+    )
+    assert bridge_qq._has_repeated_long_phrase(bad)
+    assert bridge_qq._needs_self_check(bad, "张雪峰老师 我还记得你")
+
+
+def test_bad_final_reply_and_qa_context_guards():
+    assert bridge_qq._reject_bad_final_reply(
+        '搜索中...\n```json\n'
+        '{"query": "高考志愿填报 选专业", "count": 8, "source": "cn.bing"}\n```')
+    assert not bridge_qq._reject_bad_final_reply(
+        "塔菲根据搜索结果给出正常回答。")
+    assert not bridge_qq._has_pathological_repetition(
+        "这个解释很清楚，这个解释很清楚，但上下文仍然正常。")
+    assert "用户问答上下文" in bridge_qq.HISTORY_SUMMARY_SYSTEM
+    assert "纠正" in bridge_qq.HISTORY_SUMMARY_SYSTEM
+
+
+def test_normalize_tool_calls_drops_invalid_arguments():
+    calls = [
+        {
+            "id": "1",
+            "type": "function",
+            "function": {"name": "search_web", "arguments": "{bad json"},
+        },
+        {
+            "id": "2",
+            "type": "function",
+            "function": {"name": "search_web", "arguments": {"query": "张雪峰", "entities": []}},
+        },
+        {
+            "id": "3",
+            "type": "function",
+            "function": {"name": "plan_search", "arguments": "[not object]"},
+        },
+    ]
+    normalized = bridge_qq._normalize_tool_calls(calls)
+    assert len(normalized) == 1
+    args = bridge_qq.json.loads(normalized[0]["function"]["arguments"])
+    assert args["query"] == "张雪峰"
+
+
+def test_extract_dsml_and_tool_call_tags():
+    dsml = (
+        "<｜DSML｜tool_calls>\n"
+        "<｜DSML｜invoke name=\"search_web\">\n"
+        "<｜DSML｜parameter name=\"query\">张雪峰 考研</｜DSML｜parameter>\n"
+        "<｜DSML｜parameter name=\"entities\">[\"张雪峰\"]</｜DSML｜parameter>\n"
+        "</｜DSML｜invoke>\n"
+        "</｜DSML｜tool_calls>"
+    )
+    calls = bridge_qq._extract_tool_calls_from_text(dsml)
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "search_web"
+    args = bridge_qq.json.loads(calls[0]["function"]["arguments"])
+    assert args["query"] == "张雪峰 考研"
+    assert args["entities"] == ["张雪峰"]
+
+    tagged = (
+        "<tool_call><function=search_web>"
+        "<param name=\"query\">C罗 年龄</param>"
+        "</tool_call>"
+    )
+    calls = bridge_qq._extract_tool_calls_from_text(tagged)
+    assert len(calls) == 1
+    assert bridge_qq.json.loads(
+        calls[0]["function"]["arguments"]
+    )["query"] == "C罗 年龄"
+
+
+def test_single_shot_search_selection():
+    assert bridge_qq._should_use_single_shot_search("C罗现在多少岁")
+    assert bridge_qq._should_use_single_shot_search("珠穆朗玛峰海拔多少米")
+    assert not bridge_qq._should_use_single_shot_search(
+        "推荐几本东野圭吾的书")
+    assert not bridge_qq._should_use_single_shot_search(
+        "周杰伦《七里香》的歌词是什么")
 
 
 def test_search_source_marker_is_appended():

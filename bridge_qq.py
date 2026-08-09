@@ -375,6 +375,8 @@ def _strip_history_prompt_noise(content):
 def _sanitize_history_content(content, role="assistant"):
     """旧会话里如果存过残缺歌单，读取时替换成完整兜底，避免污染新回答。"""
     content = _strip_history_prompt_noise(content)
+    if _has_pathological_repetition(content):
+        content = _refine_polluted_history(content)
     if role == "assistant":
         if _song_recommendation_broken(content):
             return _song_recommendation_fallback_reply()
@@ -443,6 +445,7 @@ def _clean_date_concat(text):
 def _refine_polluted_history(content):
     """保留人物/作品信息，只移除重复片段和粘连日期。"""
     content = _clean_date_concat(content or "")
+    content = _clean_pathological_repetition(content)
     for old, new in _LEGACY_POLLUTION_TABLE:
         content = content.replace(old, new)
     return _sanitize_reply(content)
@@ -633,33 +636,28 @@ def _dialog_mode_prompt(mode):
     if mode == "lyrics":
         return (
             "\n【对话模式：歌词查询】\n"
-            "直接回答用户要的歌词/歌曲信息，不要给 3 个方向，不要创作歌词。\n"
-            "先确认歌名、歌手、专辑；歌名必须写完整，书名号必须成对。\n"
-            "歌词只能引用搜索结果正文或长期记忆里的真实歌词；"
-            "没有完整歌词时明确说只找到片段/没搜到，禁止编造歌词。\n"
-            "始终用塔菲语气。")
+            "按用户要的歌词/歌曲信息回答，怎么组织由你判断。\n"
+            "资料不足就说明不确定。\n"
+            "输出正文，不要 Markdown 或工具调用格式；始终用塔菲语气。")
     if mode == "comfort":
         return (
             "\n【对话模式：安慰】\n"
-            "先共情，不急着给建议，不说空洞的“加油/会好的”；"
-            "可以用一个具体小画面或比喻陪着对方；"
+            "先接住情绪，怎么安慰和给建议由你判断；可以用具体小画面或比喻。\n"
             "如果涉及自我伤害或持续危机，温和建议寻求专业帮助，并强调不是一个人面对。\n"
-            "始终用塔菲语气，但不要嘴臭或过度玩梗。")
+            "始终用塔菲语气。")
     if mode == "creative":
         return (
             "\n【对话模式：创意】\n"
-            "不直接给成品；先给 3 颗不同方向的种子，每颗用 2-3 句话勾勒；"
-            "让用户挑一颗继续，再深入展开。\n"
-            "始终用塔菲语气包装，不转述 JSON。")
+            "按用户需求直接展开，怎么给方向、给多少由你判断。\n"
+            "始终用塔菲语气包装，不要输出 JSON 或工具调用格式。")
     if mode == "task":
         return (
             "\n【对话模式：任务】\n"
-            "先一句话复述/确认任务；主体分点输出，每点先结论再解释；"
-            "结尾确认下一步。\n"
-            "始终用塔菲语气，但不牺牲清晰、准确和实时优先。")
+            "按任务直接回答，需要确认时再确认，怎么组织由你判断。\n"
+            "始终用塔菲语气。")
     return (
         "\n【对话模式：闲聊】\n"
-        "短、轻、有趣，可以用比喻或反问；不主动长篇轰炸；"
+        "像群里朋友一样自然接话，长短由你判断；"
         "始终用塔菲语气。")
 
 
@@ -723,7 +721,7 @@ _STYLE_FEWSHOT_EXAMPLES = [
 _FACTUAL_FEWSHOT_EXAMPLES = [
     (
         "梅西 C罗今年多少岁了",
-        "梅西出生于1987年6月24日，C罗出生于1985年2月5日；按当前日期分别计算年龄，两个人都要答，不能只答一个。",
+        "梅西出生于1987年6月24日，C罗出生于1985年2月5日；按当前日期分别计算年龄，两个人都答到。",
     ),
     (
         "2026世界杯冠军是谁",
@@ -827,8 +825,8 @@ TOOLS = [
             "name": "plan_search",
             "description": (
                 "在执行搜索前，先将用户问题拆解为多个独立、短小的搜索意图。"
-                "必须覆盖问题的不同方面或时间维度；query 必须精炼关键词，"
-                "不要使用长句；如果 query 太长，就继续拆成多个短 query。"
+                "尽量覆盖问题的不同方面或时间维度；query 尽量精炼成短关键词，"
+                "如果 query 太长，就继续拆成多个短 query。"
             ),
             "parameters": {
                 "type": "object",
@@ -909,9 +907,8 @@ def _glm_web_search_tool():
             "search_engine": GLM_WEB_SEARCH_ENGINE,
             "search_result": "True",
             "search_prompt": (
-                f"请严格根据{{search_result}}回答。当前日期：{_current_date_text()}。"
-                "交叉综合多个来源，优先给出准确的出生日期、年龄、人名、时间、数字和事件；"
-                "不要编造搜索资料里没有的信息。"
+                f"请结合搜索资料和当前日期回答。当前日期：{_current_date_text()}。"
+                "交叉综合多个来源；资料不足就说明不确定。"
             ),
             "count": GLM_WEB_SEARCH_COUNT,
             "content_size": "high",
@@ -1379,7 +1376,7 @@ def _generic_fallback_query(query):
     stripped = False
     for prefix in (
         "我是说的梗", "我说的是梗", "我说的是", "我是说的",
-        "说的是", "其实我说的", "我是说", "就是",
+        "我问的是", "你问的是", "说的是", "其实我说的", "我是说", "就是",
     ):
         if q.startswith(prefix):
             q = q[len(prefix):].strip()
@@ -1389,7 +1386,7 @@ def _generic_fallback_query(query):
         q = f"{q} 梗"
     if not q:
         return query or ""
-    if not stripped:
+    if not stripped or "梗" not in q:
         built = _build_search_query(q)
         if built:
             q = built
@@ -1404,13 +1401,28 @@ _FACTUAL_TRIGGER = re.compile(
     r"新闻|比分|比赛|天气|温度|股票|股价|汇率|世界杯|冠军|亚军|季军|总统|选举|事件|"
     r"歌词|谁唱的|唱一下|唱一段|完整歌词"
     r"发生了什么|最新|现在|价格|多少钱|什么时候|哪天|几月|几号|哪一年|何时|"
-    r"是谁|什么是|是什么|为什么|现任|主教练|教练|球员|选手|歌手|演员|主播|战队|俱乐部|百科|简介|资料|年龄|年纪|几岁|多大|多少岁|生日|出生|现状|身价|全名|链接|直播间|官方|几点",
+    r"是谁|什么是|是什么|为什么|现任|主教练|教练|球员|选手|歌手|演员|主播|战队|俱乐部|百科|简介|资料|年龄|年纪|几岁|多大|多少岁|生日|出生|现状|身价|全名|链接|直播间|官方|几点"
+    r"|海拔|高度|多少米|多少年|多少号|多少位",
     re.IGNORECASE,
 )
 
 def _is_factual(text):
     """温度判定：真正需要准确的事实/知识问题才用低温。"""
     return bool(_FACTUAL_TRIGGER.search(text))
+
+
+def _should_use_single_shot_search(text):
+    """简单事实问题跳过工具规划轮，直接内置搜索一次再成文。"""
+    if not ALWAYS_SEARCH or not _is_factual(text):
+        return False
+    if (
+        _is_guide_query(text)
+        or _is_lyrics_query(text)
+        or _TASK_MODE_RE.search(text or "")
+        or _recommendation_category(text)
+    ):
+        return False
+    return True
 
 _SEARCH_CACHE_TTL = float(os.environ.get("QQ_SEARCH_CACHE_TTL", "300"))
 _SEARCH_CACHE = {}
@@ -1459,6 +1471,7 @@ def _is_generic_year_noise(title, desc, query):
 _SEARCH_QUESTION_WORDS = re.compile(
     r"什么时候|哪天|几月|几号|哪一年|何时|是谁|什么是|是什么|为什么|在哪|哪里|哪个|"
     r"是否|如何|怎么|多少钱|什么|哪|谁|吗|呢|啊|呀|哈|了|的|把|还|给|"
+    r"评价|看待|记得|老师|是|你|我|他|她|徒弟|"
     r"详细介绍|介绍一下|介绍下|帮我|麻烦|请问|告诉|说说|讲一下|知道|一下|"
     r"最近|最新|近期|刚刚|目前|当前|现在|"
     r"请搜索并总结|请搜索并简要介绍|请总结|请简要介绍|请介绍一下|请介绍|"
@@ -1631,13 +1644,36 @@ def _extract_events_rule(text):
 def _build_search_query(text):
     """从问题里提取搜索关键词，去掉疑问词和聊天词，提升搜索命中率。"""
     cleaned = _clean_question(text)
+    cleaned = cleaned.replace("卖网课", "网课")
     cleaned = cleaned.replace("今年", time.strftime("%Y年"))
     cleaned = cleaned.replace("去年", str(int(time.strftime("%Y")) - 1) + "年")
     cleaned = re.sub(r"(?<=[\u4e00-\u9fff])(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])(?=[\u4e00-\u9fff])", " ", cleaned)
     cleaned = cleaned.replace("C 罗", "C罗")
     cleaned = _SEARCH_QUESTION_WORDS.sub(" ", cleaned)
+    cleaned = re.sub(
+        r"(?<=[\u4e00-\u9fff])(?:和|与|还有|以及)(?=[\u4e00-\u9fff])",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?:^|[\s，,;；、/\\]+)(?:和|与|还有|以及)(?=[\u4e00-\u9fff])",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?<=[\u4e00-\u9fff])网课(?=[\u4e00-\u9fff])",
+        " 网课 ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?:^|[\s，,;；、/\\]+)网课(?=[\u4e00-\u9fff])",
+        " 网课 ",
+        cleaned,
+    )
     parts = [p.strip() for p in re.split(r"[\s，,。？！!；;：:]+", cleaned) if p.strip()]
     meaningful = [p for p in parts if len(p) >= 2]
+    if "网课" in meaningful:
+        meaningful = [p for p in meaningful if p != "网课"] + ["网课"]
     if not meaningful:
         return _clean_question(text)
     joined = "".join(meaningful)
@@ -2282,6 +2318,59 @@ def _search_engine(query, engine, max_results):
     return _extract_search_results(html, engine, max_results, query)
 
 
+def _search_duckduckgo(query, max_results=8):
+    """DuckDuckGo 无 key 搜索兜底，复用项目 web-search skill 脚本。"""
+    script = os.path.join(
+        BASE_DIR, "skills", "web-search", "scripts", "search.py")
+    if not os.path.exists(script):
+        return []
+    python_exe = sys.executable.replace("pythonw.exe", "python.exe")
+    try:
+        proc = subprocess.run(
+            [
+                python_exe, script, query,
+                "--format", "json",
+                "--max-results", str(max_results),
+                "--region", "cn-zh",
+                "--safe-search", "moderate",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=25,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        )
+    except Exception as exc:
+        log(f"[搜索] duckduckgo 调用失败: {repr(exc)[:80]}")
+        return []
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return []
+    try:
+        rows = json.loads(proc.stdout)
+    except Exception:
+        return []
+    out = []
+    seen = set()
+    for row in rows or []:
+        title = _normalize_entity_spacing(str(row.get("title") or "").strip())
+        desc = _normalize_entity_spacing(str(row.get("body") or "").strip())
+        url = str(row.get("href") or "").strip()
+        if not title or not desc:
+            continue
+        key = re.sub(r"\W+", "", title.lower())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        line = f"【{title[:60]}】{desc[:SEARCH_SNIPPET_CHARS]}"
+        if url:
+            line += f"（{url}）"
+        out.append(line)
+        if len(out) >= max_results:
+            break
+    return out
+
+
 _LYRIC_URL_HINTS = (
     "22lrc.com", "genius.com", "mulanci.org", "goflac.com",
     "geciyi.com", "jayfc.com", "lyrics.net.cn", "geci", "lyrics", "songs",
@@ -2704,9 +2793,21 @@ def _build_lyrics_fallback_answer(query, source_text, memory_text=""):
 
 def search_web(query, max_results=8):
     """多源搜索：统一入口带缓存、引擎失败统计和自动降级。"""
+    ddg_results = _search_duckduckgo(query, max_results)
+    if ddg_results:
+        combined = "\n".join(ddg_results)
+        _search_cache_set(_search_cache_key(query), combined)
+        log(f"[搜索] duckduckgo 优先 ({len(ddg_results)}条)")
+        return combined
     result = search_with_resilience(query, max_results)
     if result and not result.startswith("（搜索失败"):
         return result
+    ddg_results = _search_duckduckgo(query, max_results)
+    if ddg_results:
+        combined = "\n".join(ddg_results)
+        _search_cache_set(_search_cache_key(query), combined)
+        log(f"[搜索] 使用 duckduckgo 兜底 ({len(ddg_results)}条)")
+        return combined
     if DRISSION_SEARCH_ENABLED:
         try:
             html = _drission_search_html(query, "bing_cn")
@@ -2729,6 +2830,19 @@ async def search_web_async(query, max_results=8, entities=None, extra_queries=No
         inc_stat("search_cache_hits")
         log("[搜索] 命中缓存")
         return cached
+    try:
+        ddg_results = await asyncio.wait_for(
+            asyncio.to_thread(_search_duckduckgo, query, max_results),
+            timeout=25,
+        )
+    except Exception as exc:
+        ddg_results = []
+        log(f"[搜索] duckduckgo 优先失败: {repr(exc)[:80]}")
+    if ddg_results:
+        combined = "\n".join(ddg_results)
+        log(f"[搜索] duckduckgo 优先 ({len(ddg_results)}条)")
+        _search_cache_set(cache_key, combined)
+        return combined
     # 2026-08-05 实测：百度/搜狗桌面版优先；微信/360/百度移动作为兜底。
     variants = [query] if exact else _build_search_variants(query, entities, extra_queries)
     primary = ("bing_cn", "sogou", "suggest", "360_m", "baidu")
@@ -2811,6 +2925,19 @@ async def search_web_async(query, max_results=8, entities=None, extra_queries=No
         merged = _merge_search_results(collected, max_results * 2)
         combined = "\n".join(merged)
         log(f"[搜索] 合并 {'/'.join(used_engines)} (并发)")
+        _search_cache_set(cache_key, combined)
+        return combined
+    try:
+        ddg_results = await asyncio.wait_for(
+            asyncio.to_thread(_search_duckduckgo, query, max_results),
+            timeout=25,
+        )
+    except Exception as exc:
+        ddg_results = []
+        log(f"[搜索] duckduckgo 兜底失败: {repr(exc)[:80]}")
+    if ddg_results:
+        combined = "\n".join(ddg_results)
+        log(f"[搜索] 使用 duckduckgo 兜底 ({len(ddg_results)}条)")
         _search_cache_set(cache_key, combined)
         return combined
     if DRISSION_SEARCH_ENABLED:
@@ -3135,6 +3262,10 @@ def _web_search_to_text(rows, max_entries=10):
 def _fix_known_phrase_errors(reply, query):
     """修已知固定短语的轻微缩字，例如玄武口音里的“玄武神兽”。"""
     reply = reply or ""
+    if "玄武" in (query or "") and "玄歯" in reply:
+        reply = reply.replace("玄歯", "玄武")
+    if "玄武" in (query or "") and "玄齿" in reply:
+        reply = reply.replace("玄齿", "玄武")
     if "玄武口音" in (query or "") and "玄武神" in reply and "玄武神兽" not in reply:
         reply = reply.replace("玄武神", "玄武神兽")
     if "世界杯" in (query or "") and "托雷斯" in reply and "费兰·托雷斯" not in reply:
@@ -3166,6 +3297,11 @@ def _strip_suggestion_lines(text):
         line for line in (text or "").splitlines()
         if not line.lstrip().startswith(_SEARCH_SUGGEST_PREFIXES)
     ).strip()
+
+
+def _search_evidence_text(text):
+    """只保留可引用网页结果；搜索建议/提示词不能算有效搜索结果。"""
+    return _strip_suggestion_lines(text or "").strip()
 
 
 def _is_important_number(phrase):
@@ -3275,16 +3411,108 @@ def _looks_like_tool_call(reply):
     """识别模型把工具调用写成文本、没进入最终答案的情况。"""
     text = reply or ""
     return bool(re.search(
-        r"<tool_call|<tool_|tool_calls|arguments|"
-        r"\"queries\"|plan_search|thought_process|recency_days|"
+        r"<tool_call|<longcat_tool_call|<｜DSML｜tool_calls|"
+        r"tool_calls|arguments|"
+        r"\"queries\"|\"query\"|\"count\"|\"source\"|"
+        r"plan_search|thought_process|recency_days|"
         r"\"type\"\s*:\s*\"function\"|\"name\"\s*:\s*\"search_web\"",
         text, re.IGNORECASE))
+
+
+def _coerce_tool_arg(value, name):
+    """把 DeepSeek 文本工具调用里的参数转成结构值。"""
+    text = (value or "").strip()
+    if name in {"queries", "entities"}:
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+    return text
+
+
+def _parse_tagged_tool_calls(text):
+    """解析 DeepSeek 常见文本格式：<｜DSML｜tool_calls> 和 <tool_call>。"""
+    if not text:
+        return []
+
+    def add_call(name, args):
+        if name not in {"plan_search", "search_web", "fetch_page"}:
+            return
+        if name == "plan_search" and not isinstance(args.get("queries"), list):
+            return
+        if name == "search_web" and not args.get("query"):
+            return
+        if name == "fetch_page" and not args.get("url"):
+            return
+        calls.append({
+            "id": f"call_tag_{len(calls)}",
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(args, ensure_ascii=False),
+            },
+        })
+
+    calls = []
+    for name, body in re.findall(
+        r"<[^>]*invoke\s+name\s*=\s*[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)"
+        r"</[^>]*invoke\s*>",
+        text,
+        re.I,
+    ):
+        args = {}
+        for pname, pval in re.findall(
+            r"<[^>]*parameter\s+name\s*=\s*[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)"
+            r"</[^>]*parameter\s*>",
+            body,
+            re.I,
+        ):
+            args[pname.strip()] = _coerce_tool_arg(pval, pname)
+        add_call(name.strip(), args)
+
+    for name, body in re.findall(
+        r"<[^>]*function\s*=\s*([A-Za-z_]+)[^>]*>([\s\S]*?)"
+        r"</[^>]*tool_call\s*>",
+        text,
+        re.I,
+    ):
+        args = {}
+        for pname, pval in re.findall(
+            r"<[^>]*param\s+name\s*=\s*[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)"
+            r"</[^>]*param\s*>",
+            body,
+            re.I,
+        ):
+            args[pname.strip()] = _coerce_tool_arg(pval, pname)
+        add_call(name.strip(), args)
+
+    for name, body in re.findall(
+        r"<[^>]*tool_call\s*>([A-Za-z_]+)([\s\S]*?)</[^>]*tool_call\s*>",
+        text,
+        re.I,
+    ):
+        args = {}
+        for pname, pval in re.findall(
+            r"<[^>]*arg_key\s*>([^<]+)</[^>]*arg_key\s*>\s*"
+            r"<[^>]*arg\s*>([\s\S]*?)</[^>]*arg\s*>",
+            body,
+            re.I,
+        ):
+            args[pname.strip()] = _coerce_tool_arg(pval, pname)
+        add_call(name.strip(), args)
+
+    return calls
 
 
 def _extract_tool_calls_from_text(text):
     """从模型误写进正文的工具调用 JSON 中恢复 tool_calls。"""
     if not text or not _looks_like_tool_call(text):
         return []
+    tagged = _parse_tagged_tool_calls(text)
+    if tagged:
+        return _normalize_tool_calls(tagged)
     cleaned = re.sub(r"```(?:json)?|```", "", text or "")
     candidates = []
     idx = 0
@@ -3344,7 +3572,41 @@ def _extract_tool_calls_from_text(text):
                     "query": str(args.get("query") or ""),
                     "entities": args.get("entities") or [],
                 })
-    return calls
+    return _normalize_tool_calls(calls)
+
+
+def _normalize_tool_calls(tool_calls):
+    """清洗模型返回的工具调用，修复/丢弃无效 arguments，避免上游 HTTP 400。"""
+    normalized = []
+    for tc in tool_calls or []:
+        fn = tc.get("function") or {}
+        name = str(fn.get("name") or "").strip()
+        if name not in {"plan_search", "search_web", "fetch_page"}:
+            continue
+        raw_args = fn.get("arguments")
+        if isinstance(raw_args, dict):
+            args = raw_args
+        else:
+            raw_text = str(raw_args or "{}").strip()
+            try:
+                args = json.loads(raw_text)
+            except Exception:
+                match = re.search(r"\{.*\}", raw_text, re.S)
+                try:
+                    args = json.loads(match.group()) if match else None
+                except Exception:
+                    args = None
+        if not isinstance(args, dict):
+            continue
+        normalized.append({
+            "id": str(tc.get("id") or f"call_{len(normalized)}"),
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(args, ensure_ascii=False),
+            },
+        })
+    return normalized
 
 def _looks_garbled_reply(reply):
     text = reply or ""
@@ -3353,6 +3615,10 @@ def _looks_garbled_reply(reply):
     if text.count("“") != text.count("”"):
         return True
     if re.search(r"\d{4}年\d{1,2}月\d{1,2}日\d{1,2}年", text):
+        return True
+    if re.search(r"\d{4}年\s*[，,]?\s*\d{1,2}年", text):
+        return True
+    if re.search(r"\d{1,2}日\s*\d{1,2}日\s*\d{1,2}年", text):
         return True
     if "某处错字" in text or "某处夸张描述" in text:
         return True
@@ -3373,6 +3639,51 @@ def _has_repeated_long_phrase(text):
                 return True
             seen.add(chunk)
     return False
+
+
+def _has_pathological_repetition(text):
+    """只识别明显病态重复：长片段重复至少 3 次，避免误杀正常长回答。"""
+    compact = re.sub(r"[\s，。！？、；：]+", "", text or "")
+    for length in (7, 8, 10, 12, 16):
+        counts = Counter(
+            compact[i:i + length]
+            for i in range(max(0, len(compact) - length + 1))
+        )
+        if counts and counts.most_common(1)[0][1] >= 3:
+            return True
+    return False
+
+
+def _clean_pathological_repetition(text):
+    """删除明显病态重复的长片段，保留第一次出现的内容。"""
+    cleaned = text or ""
+    for length in (16, 12, 10):
+        while True:
+            seen = {}
+            found = None
+            for i in range(len(cleaned) - length + 1):
+                chunk = cleaned[i:i + length]
+                if chunk in seen:
+                    found = (chunk, seen[chunk], i)
+                    break
+                seen[chunk] = i
+            if not found:
+                break
+            chunk, _, second = found
+            cleaned = cleaned[:second] + cleaned[second + len(chunk):]
+    return _sanitize_reply(cleaned)
+
+
+def _reject_bad_final_reply(reply):
+    """模型最终回答出现工具 JSON、乱码或重复长片段时，视为无效输出。"""
+    return bool(
+        reply
+        and (
+            _looks_like_tool_call(reply)
+            or _looks_garbled_reply(reply)
+            or _has_pathological_repetition(reply)
+        )
+    )
 
 
 def _needs_self_check(reply, query, context=""):
@@ -3899,10 +4210,8 @@ class GroupStyleStore:
             "你是群聊风格分析器。根据统计数据和真实示例，用自然语言描述这个群的说话风格。\n"
             "输出要求：\n"
             "1. 用 3-5 句话描述，自然口语化\n"
-            "2. 包含：常用口头禅、句式特点、标点偏好、emoji 习惯、消息长度\n"
-            "3. 不要机械罗列，要像在跟人描述『这个群说话什么调调』\n"
-            "4. 不要编造数据里没有的特征\n"
-            "5. 只输出描述文本，不要前缀标签"
+            "2. 可以覆盖：常用口头禅、句式特点、标点偏好、emoji 习惯、消息长度\n"
+            "3. 只输出描述文本，不要前缀标签"
         )
         user_content = (
             f"【统计数据】\n{stats_text}\n\n"
@@ -3968,10 +4277,7 @@ def build_style_system_prompt(style_store, gid):
     return (
         "\n【本群说话风格】\n"
         + style
-        + "\n\n【使用约束】\n"
-        "- 自然模仿这些表达，不要机械堆砌\n"
-        "- 不要固定用同一个 emoji 组合（尤其 🐢🔥）\n"
-        "- 参考真实示例的句式和长度，但具体怎么用自己判断"
+        + "\n\n参考真实示例的句式和长度，具体怎么用自己判断。"
     )
 
 # ---------- 自我改进：检测用户纠正，写入知识库 ----------
@@ -4375,6 +4681,7 @@ class Bridge:
                     fn = tc.get("function") or {}
                     if fn.get("arguments"):
                         fn["arguments"] = _repair_utf8(str(fn["arguments"]))
+                tool_calls = _normalize_tool_calls(tool_calls)
                 if not tool_calls and content and _looks_like_tool_call(content):
                     parsed = _extract_tool_calls_from_text(content)
                     if parsed:
@@ -4431,6 +4738,7 @@ class Bridge:
 
         content = "".join(content_parts).strip()
         tool_calls = [tool_acc[idx] for idx in sorted(tool_acc)]
+        tool_calls = _normalize_tool_calls(tool_calls)
         if not content and not tool_calls:
             for line in lines:
                 if not line.startswith("data:"):
@@ -4447,6 +4755,7 @@ class Bridge:
                     fn = tc.get("function") or {}
                     if fn.get("arguments"):
                         fn["arguments"] = _repair_utf8(str(fn["arguments"]))
+                tool_calls = _normalize_tool_calls(tool_calls)
                 if content or tool_calls:
                     break
         if not tool_calls and content and _looks_like_tool_call(content):
@@ -4499,6 +4808,11 @@ class Bridge:
                     reply = _clean_reply(reply)
                     if finish_reason == "length":
                         log(f"[API] {model_ref} 输出被 max_tokens 截断(finish_reason=length)，丢弃")
+                        _mark_provider_weak(model_ref)
+                        reply = ""
+                        discarded = True
+                    if reply and _reject_bad_final_reply(reply):
+                        log(f"[API] {model_ref} 工具 JSON/乱码/重复回复，丢弃: {reply[:40]}")
                         _mark_provider_weak(model_ref)
                         reply = ""
                         discarded = True
@@ -4581,6 +4895,10 @@ class Bridge:
                     log(f"[竞速] {model_ref} 输出被 max_tokens 截断(finish_reason=length)，丢弃")
                     _mark_provider_weak(model_ref)
                     return "", model_ref
+                if cleaned and _reject_bad_final_reply(cleaned):
+                    log(f"[竞速] {model_ref} 工具 JSON/乱码/重复回复，丢弃: {cleaned[:40]}")
+                    _mark_provider_weak(model_ref)
+                    return "", model_ref
                 if weak_query and _is_weak_reply(cleaned, weak_query):
                     log(f"[竞速] {model_ref} 弱回复，丢弃: {cleaned[:40]}")
                     _mark_provider_weak(model_ref)
@@ -4655,6 +4973,10 @@ class Bridge:
             if _provider_blocked(model_ref):
                 continue
             provider, model_name = model_ref.split("/", 1)
+            direct_fallback = (
+                provider == "opencode_free"
+                or (provider == "opencode" and "deepseek" in model_name.lower())
+            )
             cfg = PROVIDERS.get(provider, {})
             api_url = cfg.get("url", "")
             api_key = cfg.get("key") or self.api_key
@@ -4694,8 +5016,10 @@ class Bridge:
                 reply, state, tool_calls, finish_reason, web_search = await loop.run_in_executor(
                     None, lambda b=body, u=api_url, k=api_key: self._api_call(b, u, k))
                 if finish_reason == "length":
-                    log(f"[工具] {model_ref} 输出被 max_tokens 截断(finish_reason=length)，切换备选")
+                    log(f"[工具] {model_ref} 输出被 max_tokens 截断，直接降级内置搜索")
                     _mark_provider_weak(model_ref)
+                    if direct_fallback:
+                        return [], "", model_ref, []
                     continue
                 if state == "ok":
                     inc_stat("model_success")
@@ -4718,17 +5042,27 @@ class Bridge:
                         _mark_provider_ok(model_ref)
                         return [], reply, model_ref, []
                     _mark_provider_weak(model_ref)
+                    log(f"[工具] {model_ref} 未返回有效工具/回复，直接降级内置搜索")
+                    if direct_fallback:
+                        return [], "", model_ref, []
                     continue
                 if state == "rate_limit":
                     _mark_provider_down(model_ref, 30)
+                elif state in ("http_400", "http_401", "http_403", "http_404"):
+                    _mark_provider_weak(model_ref)
                 else:
                     _mark_provider_down(model_ref, 15)
                 inc_stat("model_fail")
-                log(f"[工具] {model_ref} 异常({state})，切换备用")
+                log(f"[工具] {model_ref} 工具调用失败({state})，直接降级内置搜索")
+                if direct_fallback:
+                    return [], "", model_ref, []
+                continue
             except Exception as e:
                 inc_stat("model_fail")
-                log(f"[工具] {model_ref} 调用异常: {repr(e)[:100]}")
+                log(f"[工具] {model_ref} 调用异常，直接降级内置搜索: {repr(e)[:100]}")
                 _mark_provider_down(model_ref, 15)
+                if direct_fallback:
+                    return [], "", model_ref, []
         return [], "", "", []
     async def _compress_history(self, key):
         """后台提炼旧历史为摘要，不清空原文，只记录已压缩位置。"""
@@ -4993,6 +5327,26 @@ class Bridge:
             log(f"[搜索词] 模型压缩失败，使用规则版: {repr(e)[:80]}")
         fallback = _build_search_query(text)
         return ([fallback] if fallback else [text]), [], _extract_events_rule(text)
+    async def _self_check_reply(self, query, source, reply, max_tokens=800):
+        """质检并重写：检测到重复/残缺/粘贴搜索原文时，让模型重写最终回答。"""
+        raw, _ = await self._complete(
+            SELF_CHECK_SYSTEM,
+            [{"role": "user", "content": (
+                f"问题：{query}\n"
+                f"可靠资料：{source or '（无搜索结果）'}\n"
+                f"当前回答：{reply}"
+            )}],
+            max_tokens=max_tokens,
+            temperature=0.2,
+            top_p=0.7,
+            model_refs=MODELS_FACTUAL,
+        )
+        cleaned = _sanitize_reply(raw or "")
+        if not cleaned or re.match(r"^\s*PASS\b", cleaned, re.IGNORECASE):
+            return reply
+        log(f"[自检] 重写完成: {len(cleaned)}字")
+        return cleaned
+
     async def _grounding_check(self, query, search_results, reply):
         """事实核查：用 LLM 结构化判断，不只靠关键词重叠。"""
         raw, _ = await self._complete(
@@ -5046,13 +5400,12 @@ class Bridge:
     async def _restyle_as_taffy(self, reply, query):
         system = (
             "你是永雏塔菲。把下面的回答用塔菲语气重写。\n"
-            "【最高优先级红线】：绝对禁止修改、遗漏、歪曲原回答中的任何事实、人名、数字、时间、链接！"
-            "你只能在原意基础上加语气词！\n"
+            "怎么调整表达由你判断。\n"
             "要求：\n"
             "- 用 taffy/塔菲/小菲自称，避免普通AI/客服腔\n"
             "- 喵有节制，不要每句都加\n"
             "- 保留情绪外放、口语化、抽象玩梗的塔菲风格\n"
-            "- 关键名称写全，内容保持完整；如果原回答表达了'不知道'，重写后依然要表达'塔菲不知道'"
+            "- 如果原回答表达了'不知道'，重写后也保留这个意思"
         )
         user_content = f"问题：{query}\n原始回答：{reply}"
         for attempt in range(2):
@@ -5068,17 +5421,14 @@ class Bridge:
             if restyled and _is_taffy_styled(restyled):
                 return restyled
             if attempt == 0:
-                system += "\n上一条重写还不够塔菲，必须出现塔菲/taffy/喵等身份感标记。"
+                system += "\n上一条重写还不够塔菲，再自然一点，至少出现一次塔菲/taffy/喵等身份感表达。"
         return ""
 
     async def _llm_answer_from_search(self, query, search_text):
         system = (
-            "你是永雏塔菲。请根据搜索结果直接回答，不要粘贴搜索原文，不要解释过程。"
-            "把信息凝练成塔菲语气回答；关键名称必须写全；事实准确。\n"
-            "收到搜索结果后，必须逐条完整阅读标题、摘要和正文片段，不能只看关键词。\n"
-            "回答前把搜索内容里的完整名称、日期、数字、事件逐字核对；关键名称和短语照抄完整，禁止压缩、少字、改字。\n"
-            "搜索内容没有的信息不要编造；不同结果冲突时说明不确定。\n"
-            "QQ 不渲染 Markdown，禁止输出 **、*、`、# 或 Markdown 链接。"
+            "你是永雏塔菲。根据搜索结果自然成文，不要原样粘贴搜索原文。\n"
+            "把信息整理成塔菲语气回答；怎么取舍和表达由你判断。\n"
+            "QQ 不渲染 Markdown，不要输出 **、*、`、# 或 Markdown 链接。"
         )
         user_content = (
             f"问题：{query}\n"
@@ -5143,6 +5493,18 @@ class Bridge:
         system += "\n" + CURRENT_DATE_PROMPT.format(date=_current_date_text())
         if summary:
             system += (f"\n【历史摘要】\n{summary[-CONTEXT_SUMMARY_MAX_CHARS:]}")
+        if last_question:
+            system += (
+                "\n【上一轮问答上下文】\n"
+                f"提问者：{last_speaker or '未知'}\n"
+                f"用户问题：{last_question[:500]}\n"
+                f"塔菲回答：{last_answer[:800]}"
+            )
+        if _CORRECTION_FOLLOWUP_RE.search(query):
+            system += (
+                "\n【追问识别】当前问题疑似纠正/追问，先理解上一轮问题与回答，"
+                "再按用户最新意图回答。"
+            )
 
         # 第一轮：搜索方式由 LLM 自己判断
         intent = _classify_intent(query)
@@ -5167,6 +5529,7 @@ class Bridge:
         tool_calls = []
         tool_direct_reply = ""
         native_search = []
+        single_shot_used = False
         reply = ""
         used_model = ""
 
@@ -5176,12 +5539,15 @@ class Bridge:
                 return
             search_attempted = True
             generic_query = _generic_fallback_query(query)
-            raw = await search_web_async(
+            raw_source = await search_web_async(
                 generic_query,
                 max_results=MAX_SEARCH_RESULTS,
                 exact=True,
             )
+            raw = _search_evidence_text(raw_source)
             if not raw:
+                if raw_source:
+                    log(f"[通用兜底] {generic_query[:40]} -> 仅搜索建议，不算有效结果")
                 return
             text = _distill_search_results(
                 raw,
@@ -5202,22 +5568,27 @@ class Bridge:
                 )
             log(f"[通用兜底] {generic_query[:40]} -> {len(text)}字")
 
-        try:
-            tool_calls, tool_direct_reply, tool_model, native_search = await asyncio.wait_for(
-                self._complete_with_tools(
-                    system, request_messages, model_refs=MODELS_FACTUAL,
-                    max_tokens=800,
-                    force_search=False,
-                    tools_enabled=allow_tools),
-                timeout=TOOL_CALL_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            log(f"[工具] 第一轮 {TOOL_CALL_TIMEOUT}s 超时，降级内置搜索")
-            tool_calls, tool_direct_reply = [], ""
+        if _should_use_single_shot_search(query):
+            log("[单轮搜索] 简单事实问题直接内置搜索一次")
+            single_shot_used = True
             await generic_fallback_search()
-        except Exception as e:
-            log(f"[工具] tool_calls 调用失败，退回内置搜索: {repr(e)[:80]}")
-            tool_calls, tool_direct_reply = [], ""
+        else:
+            try:
+                tool_calls, tool_direct_reply, tool_model, native_search = await asyncio.wait_for(
+                    self._complete_with_tools(
+                        system, request_messages, model_refs=MODELS_FACTUAL,
+                        max_tokens=800,
+                        force_search=False,
+                        tools_enabled=allow_tools),
+                    timeout=TOOL_CALL_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                log(f"[工具] 第一轮 {TOOL_CALL_TIMEOUT}s 超时，降级内置搜索")
+                tool_calls, tool_direct_reply = [], ""
+                await generic_fallback_search()
+            except Exception as e:
+                log(f"[工具] tool_calls 调用失败，退回内置搜索: {repr(e)[:80]}")
+                tool_calls, tool_direct_reply = [], ""
         tool_round = 0
         if tool_calls:
             tool_round += 1
@@ -5238,6 +5609,7 @@ class Bridge:
                     raw = await self._enrich_lyrics_search(
                         raw, query,
                         [item["query"] for item in planned if isinstance(item, dict)])
+                    raw = _search_evidence_text(raw)
                     if raw:
                         search_results = raw
                         if _is_lyrics_query(query):
@@ -5246,7 +5618,7 @@ class Bridge:
                             distilled = _distill_search_results(
                                 raw, query, max_entries=10, max_chars=MAX_SEARCH_CHARS,
                             )
-                        search_returned = bool(distilled) or bool(raw)
+                        search_returned = bool(distilled)
                     result_text = raw or "（无搜索结果）"
                     if thought:
                         result_text = f"搜索计划：{thought}\n\n{result_text}"
@@ -5262,6 +5634,7 @@ class Bridge:
                     raw = await search_web_async(
                         sq, max_results=MAX_SEARCH_RESULTS, exact=True)
                     raw = await self._enrich_lyrics_search(raw, query, [sq])
+                    raw = _search_evidence_text(raw)
                     if raw:
                         search_results = raw
                         if _is_lyrics_query(query):
@@ -5270,7 +5643,7 @@ class Bridge:
                             distilled = _distill_search_results(
                                 raw, sq, max_entries=10, max_chars=MAX_SEARCH_CHARS,
                             )
-                        search_returned = bool(distilled) or bool(raw)
+                        search_returned = bool(distilled)
                     tool_results.append((tc, raw or "（无搜索结果）"))
                     log(f"[工具] tool_calls search: {sq} -> {len(raw)}字")
                     log(f"[FC] 第1轮 tool_calls=search_web query={sq} -> {len(raw)}字")
@@ -5306,6 +5679,7 @@ class Bridge:
             search_attempted = True
             raw = _web_search_to_text(native_search)
             raw = await self._enrich_lyrics_search(raw, query, [query])
+            raw = _search_evidence_text(raw)
             if raw:
                 search_results = raw
                 if _is_lyrics_query(query):
@@ -5318,7 +5692,7 @@ class Bridge:
                     )
                     if not distilled:
                         distilled = raw[:MAX_SEARCH_CHARS]
-                search_returned = True
+                search_returned = bool(distilled) or bool(raw)
                 request_messages[-1]["content"] += (
                     f"\n\n【搜索结果】\n{distilled}")
                 log(f"[工具] GLM原生联网: {query[:40]} -> {len(distilled)}字")
@@ -5334,21 +5708,24 @@ class Bridge:
                     skip_final = True
             else:
                 log("[FC] 模型未返回搜索计划/直接回复，不强制规则搜索")
-        if not search_returned and not skip_final and not native_search:
+        if (
+            not search_returned
+            and not skip_final
+            and not native_search
+            and not single_shot_used
+        ):
             await generic_fallback_search()
         _log_phase(phase_start, "工具/搜索")
         if not search_returned:
             system += (
-                "\n【事实限制】当前没有搜索结果。涉及链接、直播间号、比赛安排、时间、数字、事件时，"
-                "必须明确说'查不到/无法确认'，禁止编造具体链接、直播间号、时间、数字和事件；"
-                "闲聊观点可以用'我印象中/我觉得'。")
+                "\n【当前状态】当前没有搜索结果，可以按已有知识回答，也可以说明不确定；"
+                "输出正文，不要包含工具调用格式、Markdown 或明显残缺重复片段。")
 
         # 注入当前时间
         if search_returned:
             system += (
-                "\n【回答要求】根据搜索结果回答，保持塔菲语气；"
-                "关键名称、数字、日期写完整；多条结果交叉整合；"
-                "搜索结果没有的信息不要编造，没查到就直说。"
+                "\n【回答要求】根据搜索结果自然成文，保持塔菲语气；"
+                "输出为可直接发送的正文，不要输出 Markdown、工具调用格式或明显残缺重复片段。"
             )
         system += (
             "\n【时效】以当前日期判断事件是否已发生，搜索明确的信息优先。"
@@ -5358,11 +5735,11 @@ class Bridge:
         if _CORRECTION_FOLLOWUP_RE.search(query) and distilled and not skip_final:
             if request_messages and isinstance(request_messages[-1].get("content"), str):
                 request_messages[-1]["content"] += (
-                    "\n\n【纠正型追问强制约束】\n"
+                    "\n\n【纠正型追问】\n"
                     f"用户在质疑上一句回答：{last_answer}\n"
-                    f"当前搜索结果（必须以此为准）：\n{distilled[:1000]}\n"
-                    "请基于搜索结果重新回答，不要被上一句回答带偏。\n"
-                    "如果搜索结果与上一句回答矛盾，以搜索结果为准。")
+                    f"优先依据当前搜索结果重新判断：\n{distilled[:1000]}\n"
+                    "请重新回答；如果搜索结果与上一句回答矛盾，以搜索结果为准。"
+                    )
                 log("[纠正型追问] 检测到纠正型追问，强化搜索结果约束")
 
         # 最终生成：事实/攻略类串行走稳定模型，闲聊才竞速抢答。
@@ -5429,12 +5806,26 @@ class Bridge:
             log("[Agent] 强制终止工具调用循环，防止死循环")
             reply = "塔菲暂时没搜到可靠答案，先不乱编喵。"
         reply = _sanitize_reply(reply)
+        if _looks_garbled_reply(reply) or _has_pathological_repetition(reply):
+            log("[自检] 检测到乱码/重复，触发最终回答重写")
+            checked = await self._self_check_reply(
+                query,
+                distilled or search_results,
+                reply,
+                max_tokens=min(final_max_tokens, 1200),
+            )
+            if checked:
+                reply = _sanitize_reply(checked)
         reply = _fix_known_phrase_errors(reply, query)
         source = distilled or search_results
         if source:
+            pre_preserve_reply = reply
             reply = _ensure_numeric_facts_preserved(reply, source)
             reply = _ensure_entity_facts_preserved(reply, source)
             reply = _ensure_source_phrases_preserved(reply, source)
+            if _has_pathological_repetition(reply) or _looks_garbled_reply(reply):
+                log("[后处理] 保真补全导致重复，回滚到补全前回答")
+                reply = _clean_pathological_repetition(pre_preserve_reply) or pre_preserve_reply
         reply = _append_search_source_marker(
             reply, search_returned, search_attempted)
         self.recent_replies.append(reply)
