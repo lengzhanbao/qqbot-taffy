@@ -43,8 +43,7 @@
 
 ## 隐私边界
 
-- `docs/` 含真实群聊、计划、日志标记等本地资料，只保留本机，不进入 Git。
-- `docs/public/` 只放脱敏后的架构、面试、复盘文档，可进入 Git。
+
 - `data/`、`logs/`、`.env`、`backup_qq_session.ps1`、`restore_qq_session.ps1` 都不进入 Git。
 - 代码和测试中不使用真实 QQ 号、群号或成员名，统一使用测试占位号。
 
