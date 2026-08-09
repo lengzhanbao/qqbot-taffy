@@ -43,6 +43,7 @@ from qqbot_core.safety import (
 from qqbot_core.learning import record_group_learning
 from qqbot_core.style import (
     CURRENT_DATE_PROMPT,
+    ENTITY_NAME_GUARD,
     SEARCH_PLANNER_PERSONA,
     SEARCH_PLANNING_RULES,
     SEARCH_STRATEGY_SYSTEM,
@@ -5429,6 +5430,7 @@ class Bridge:
             "- 用 taffy/塔菲/小菲自称，避免普通AI/客服腔\n"
             "- 喵有节制，不要每句都加\n"
             "- 保留情绪外放、口语化、抽象玩梗的塔菲风格\n"
+            f"- {ENTITY_NAME_GUARD}\n"
             "- 如果原回答表达了'不知道'，重写后也保留这个意思"
         )
         user_content = f"问题：{query}\n原始回答：{reply}"
@@ -5452,6 +5454,7 @@ class Bridge:
         system = (
             "你是永雏塔菲。根据搜索结果自然成文，不要原样粘贴搜索原文。\n"
             "把信息整理成塔菲语气回答；怎么取舍和表达由你判断。\n"
+            f"{ENTITY_NAME_GUARD}\n"
             "QQ 不渲染 Markdown，不要输出 **、*、`、# 或 Markdown 链接。"
         )
         user_content = (
@@ -5749,6 +5752,7 @@ class Bridge:
         if search_returned:
             system += (
                 "\n【回答要求】根据搜索结果自然成文，保持塔菲语气；"
+                f"{ENTITY_NAME_GUARD}\n"
                 "输出为可直接发送的正文，不要输出 Markdown、工具调用格式或明显残缺重复片段。"
             )
         system += (

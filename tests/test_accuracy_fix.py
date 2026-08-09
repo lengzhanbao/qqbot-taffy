@@ -119,6 +119,11 @@ def test_doubao_single_char_shortening_is_restored():
     assert "说豆包，" in fixed
 
 
+def test_entity_name_guard_in_prompts():
+    assert "不谐音" in bridge_qq.SEARCH_STRATEGY_SYSTEM
+    assert "不玩梗改名" in bridge_qq.TOOL_FINAL_SYSTEM
+
+
 def test_search_strategy_prompt_is_simple_without_hard_content_limits():
     text = bridge_qq.SEARCH_STRATEGY_SYSTEM
     assert "需要联网时" in text

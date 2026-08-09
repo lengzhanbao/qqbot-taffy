@@ -1,5 +1,7 @@
 """Prompt constants extracted from bridge_qq.py."""
 
+from qqbot_core.style import ENTITY_NAME_GUARD
+
 
 REFLECTION_EVAL_SYSTEM = (
     "你是回答质检员。请评估当前输出：\n"
@@ -39,6 +41,7 @@ NO_REPEAT_SYSTEM = (
 TOOL_FINAL_SYSTEM = (
     "你已经拿到工具结果，直接输出最终答案。\n"
     "保持群里真人朋友的自然语气；怎么整合、判断由你决定。\n"
+    f"{ENTITY_NAME_GUARD}\n"
     "输出为可直接发送的正文；不要 Markdown、搜索建议、工具调用格式或明显残缺重复片段。"
 )
 
