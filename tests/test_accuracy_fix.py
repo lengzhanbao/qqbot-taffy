@@ -618,6 +618,21 @@ def test_fix_known_phrase_errors_fixes_wufu_typo():
     assert "玄武口音" in fixed
 
 
+def test_reply_context_sanitizes_recent_bin_typos():
+    dirty = (
+        "Bin哥厉害的微博_微博最近状态不好，"
+        "谢谢队伊（星标准发音为英式）和队友对我的体和容，文件!"
+    )
+    cleaned = bridge_qq._sanitize_history_content(dirty, "assistant")
+    assert "Bin哥的微博" in cleaned
+    assert "队伊（星标准发音为英式）" not in cleaned
+    assert "体谅与包容" in cleaned
+    assert "文件!" not in cleaned
+    fixed = bridge_qq._fix_known_phrase_errors("网路黑话不是真话", "bin哥")
+    assert "网路黑话" not in fixed
+    assert "网络黑话" in fixed
+
+
 def test_answer_contract_generic_checks():
     assert "TikTok" in bridge_qq._required_entity_terms(
         "最近美国通过的对TikTok的法案核心内容是什么")

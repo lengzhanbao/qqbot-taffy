@@ -286,6 +286,15 @@ _LEGACY_POLLUTION_TABLE = [
     ("外号“”！", "外号“Viper”！"),
     ("2020年12月15日EDG", "2020年12月15日加入EDG"),
     ("夺冠的大之一", "夺冠功臣之一"),
+    ("Bin哥厉害的微博_微博", "Bin哥的微博"),
+    ("Bin哥厉害的微博", "Bin哥的微博"),
+    ("谢谢队伊（星标准发音为英式）和队友对我的体和容", "谢谢队伍和队友对我的体谅与包容"),
+    ("队伊（星标准发音为英式）", "队伍"),
+    ("体和容", "体谅与包容"),
+    ("体与容", "体谅与包容"),
+    ("网路黑话", "网络黑话"),
+    ("离BLG渣了", "离开BLG"),
+    ("文件!", ""),
 ]
 
 
@@ -3272,6 +3281,8 @@ def _fix_known_phrase_errors(reply, query):
         reply = reply.replace("干·托雷斯", "费兰·托雷斯")
     if "竹知了" in (query or "") and ".6万" in reply and "5.6万" not in reply:
         reply = reply.replace(".6万", "5.6万")
+    for old, new in _LEGACY_POLLUTION_TABLE:
+        reply = reply.replace(old, new)
     return reply
 
 
@@ -4606,7 +4617,10 @@ class Bridge:
         sender = data.get("sender") or {}
         name = sender.get("card") or sender.get("nickname") or ""
         prefix = f"（{name}）" if name else ""
-        return f"{prefix}: {text.strip()}"
+        text = _sanitize_history_content(text.strip(), "assistant")
+        if not text:
+            return ""
+        return f"{prefix}: {text}"
 
     # ---------- 模型 API 调用 ----------
     def _api_call(self, body, api_url, api_key):
