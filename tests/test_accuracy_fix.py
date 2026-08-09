@@ -110,6 +110,15 @@ def test_bin_fmvp_false_statement_cleaned():
     assert "职业上单" in fixed
 
 
+def test_doubao_single_char_shortening_is_restored():
+    reply = "豆包X是塔菲，豆包85倍，有豆包探路，敢说豆包包包，塔菲也认了"
+    fixed = bridge_qq._fix_known_phrase_errors(reply, "你怎么看豆包")
+    assert "豆包X" not in fixed
+    assert "豆包85倍" in fixed
+    assert "有豆包探路" in fixed
+    assert "说豆包，" in fixed
+
+
 def test_search_strategy_prompt_is_simple_without_hard_content_limits():
     text = bridge_qq.SEARCH_STRATEGY_SYSTEM
     assert "需要联网时" in text

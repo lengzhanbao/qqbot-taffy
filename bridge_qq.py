@@ -3272,6 +3272,13 @@ def _web_search_to_text(rows, max_entries=10):
 def _fix_known_phrase_errors(reply, query):
     """修已知固定短语的轻微缩字，例如玄武口音里的“玄武神兽”。"""
     reply = reply or ""
+    if "豆包" in (query or "") and "豆包" not in reply:
+        reply = reply.replace("豆包X", "豆包")
+        reply = re.sub(
+            r"豆(?=[0-9一二三四五六七八九十百千万]|探路|好兄弟|更|用|？|\?|，|。|！|!|的|了|嘛|啊|呢|哈|吧|多|少)",
+            "豆包",
+            reply,
+        )
     if "玄武" in (query or "") and "玄歯" in reply:
         reply = reply.replace("玄歯", "玄武")
     if "玄武" in (query or "") and "玄齿" in reply:
