@@ -633,35 +633,6 @@ _ESPORTS_IDS = (
     "bin", "jiejie", "xun", "clearlove",
 )
 
-_LEGACY_POLLUTION_TABLE = [
-    ("M跑题了meiko", "Meiko（田野）"),
-    ("EDG骑士团作为CN无畏俱乐部", "EDG俱乐部"),
-    ("EDG骑士团作为CN无畏电子竞技俱乐部俱乐部", "EDG俱乐部"),
-    ("2019年9月12日8年7月27日3年9月13日年", "2019年"),
-    ("2019年9月12日8年7月27日5年MSI", "2019年MSI"),
-    ("2026年6月3日4年8月25日4年8月26日6年7月2日1年", "2026年"),
-    ("2026年6月3日4年8月25日4年8月26日6年7月2日1年底", "2026年底"),
-    ("外号“”！", "外号“Viper”！"),
-    ("2020年12月15日EDG", "2020年12月15日加入EDG"),
-    ("夺冠的大之一", "夺冠功臣之一"),
-    ("Bin哥厉害的微博_微博", "Bin哥的微博"),
-    ("Bin哥厉害的微博", "Bin哥的微博"),
-    ("谢谢队伊（星标准发音为英式）和队友对我的体和容", "谢谢队伍和队友对我的体谅与包容"),
-    ("队伊（星标准发音为英式）", "队伍"),
-    ("体和容", "体谅与包容"),
-    ("体与容", "体谅与包容"),
-    ("网路黑话", "网络黑话"),
-    ("离BLG渣了", "离开BLG"),
-    ("文件!", ""),
-    ("S13世界赛FMVP", "职业上单"),
-    ("S13夺冠大佬", "知名职业上单"),
-    ("某条错误陈述", "某条正确陈述"),
-    ("经过与队伍沟通后，决定，感谢队伍和队友", "经过与队伍沟通后，决定暂时离开赛场休息调整，感谢队伍和队友"),
-    ("某处缺字", "某处已补全"),
-    ("Bin哥休归来再杀疯", "Bin哥休整归来再杀疯"),
-]
-
-
 def _is_song_recommendation_query(text):
     return bool(_SONG_RECOMMENDATION_RE.search(text or ""))
 
@@ -775,8 +746,6 @@ def _sanitize_history_content(content, role="assistant"):
     if "推荐系统" in content:
         content = content.replace("推荐系统", "推荐内容")
         content = content.replace("推荐系统入门教程", "可靠推荐内容")
-    for old, new in _LEGACY_POLLUTION_TABLE:
-        content = content.replace(old, new)
     return content
 
 
@@ -814,8 +783,6 @@ def _refine_polluted_history(content):
     """保留人物/作品信息，只移除重复片段和粘连日期。"""
     content = _clean_date_concat(content or "")
     content = _clean_pathological_repetition(content)
-    for old, new in _LEGACY_POLLUTION_TABLE:
-        content = content.replace(old, new)
     return _sanitize_reply(content)
 
 
@@ -4209,31 +4176,6 @@ def _web_search_to_text(rows, max_entries=10):
         lines.append(line)
     return "\n".join(lines)
 
-def _fix_known_phrase_errors(reply, query):
-    """修已知固定短语的轻微缩字，例如玄武口音里的“玄武神兽”。"""
-    reply = reply or ""
-    if "豆包" in (query or "") and "豆包" not in reply:
-        reply = reply.replace("豆包X", "豆包")
-        reply = re.sub(
-            r"豆(?=[0-9一二三四五六七八九十百千万]|探路|好兄弟|更|用|？|\?|，|。|！|!|的|了|嘛|啊|呢|哈|吧|多|少)",
-            "豆包",
-            reply,
-        )
-    if "玄武" in (query or "") and "玄歯" in reply:
-        reply = reply.replace("玄歯", "玄武")
-    if "玄武" in (query or "") and "玄齿" in reply:
-        reply = reply.replace("玄齿", "玄武")
-    if "玄武口音" in (query or "") and "玄武神" in reply and "玄武神兽" not in reply:
-        reply = reply.replace("玄武神", "玄武神兽")
-    if "世界杯" in (query or "") and "托雷斯" in reply and "费兰·托雷斯" not in reply:
-        reply = reply.replace("干·托雷斯", "费兰·托雷斯")
-    if "竹知了" in (query or "") and ".6万" in reply and "5.6万" not in reply:
-        reply = reply.replace(".6万", "5.6万")
-    for old, new in _LEGACY_POLLUTION_TABLE:
-        reply = reply.replace(old, new)
-    return reply
-
-
 _NUMBER_PHRASE_RE = re.compile(
     r"\d+(?:\.\d+)?(?:万亿|亿|万|千|百)?(?:余)?"
     r"(?:条|个|%|％|人|元|家|次|件|款|篇|起|座|场|支|金|银|铜|届|枚|项|岁)?"
@@ -4273,22 +4215,6 @@ def _is_important_number(phrase):
     ))
 
 
-def _ensure_numeric_facts_preserved(reply, source_text):
-    """把来源里的数字事实逐字保真，补回模型漏掉的前置数字。"""
-    reply = reply or ""
-    for match in _NUMBER_PHRASE_RE.finditer(source_text or ""):
-        full = match.group(0)
-        if len(full) < 2 or full in reply:
-            continue
-        if "." in full:
-            partial = "." + full.split(".", 1)[1]
-        else:
-            partial = full[1:]
-        if len(partial) >= 2 and partial in reply:
-            reply = reply.replace(partial, full)
-    return reply
-
-
 def _split_source_entities(source_text):
     """从来源里拆出短专名候选，用于补齐模型压缩掉的后缀。"""
     parts = re.split(
@@ -4308,37 +4234,6 @@ def _split_source_entities(source_text):
     return list(dict.fromkeys(out))
 
 
-def _ensure_entity_facts_preserved(reply, source_text):
-    """来源里有完整专名、回答只写前缀时，补回后缀。"""
-    reply = reply or ""
-    boundary = r"[，、。！？!?；;：:《》「」（）()—…\s]"
-    for term in _split_source_entities(source_text or ""):
-        if _entity_norm(term) in _entity_norm(reply):
-            continue
-        for cut in range(min(3, len(term)), 0, -1):
-            prefix = term[:cut]
-            if not prefix:
-                continue
-            pattern = re.escape(prefix) + r"(?=" + boundary + r"|$)"
-            if re.search(pattern, reply):
-                reply = re.sub(pattern, term, reply, count=1)
-                break
-        else:
-            for length in range(min(4, len(term)), 1, -1):
-                suffix = term[-length:]
-                if not suffix:
-                    continue
-                pattern = (
-                    r"(?<![a-zA-Z0-9])"
-                    + re.escape(suffix)
-                    + r"(?=" + boundary + r"|$)"
-                )
-                if re.search(pattern, reply):
-                    reply = re.sub(pattern, term, reply, count=1)
-                    break
-    return reply
-
-
 def _collapsed_source_variants(phrase, max_gap=8):
     """生成“中间被删掉一段”的压缩写法，用于匹配模型截断后的专名。"""
     variants = set()
@@ -4349,21 +4244,6 @@ def _collapsed_source_variants(phrase, max_gap=8):
             if len(variant) >= 3:
                 variants.add(variant)
     return variants
-
-
-def _ensure_source_phrases_preserved(reply, source_text):
-    """把来源里的完整长短语找回来，修复中间被压掉的片段。"""
-    reply = reply or ""
-    for phrase in _split_source_entities(source_text or ""):
-        if len(phrase) < 6:
-            continue
-        if _entity_norm(phrase) in _entity_norm(reply):
-            continue
-        for variant in _collapsed_source_variants(phrase):
-            if variant in reply:
-                reply = reply.replace(variant, phrase)
-                break
-    return reply
 
 
 def _looks_like_tool_call(reply):
@@ -8169,7 +8049,8 @@ class Bridge:
         # 模型重复强调一个重点也会被误判成"病态重复"，从而换一次生成。
         # 结构性残缺由 _sanitize_reply 与协议校验处理，不再重写正文。
         # 2026-10-17：不再对生成结果做事后改写。
-        # 这些保真补全（_fix_known_phrase_errors / _ensure_*_preserved）当初是为
+        # 这些保真补全（_fix_known_phrase_errors / _ensure_*_preserved，
+        # 2026-10-19 已连同对话衍生的修正表一起删除）当初是为
         # "竹知了少字"加的；那个问题的真正根因是流式解码丢内容块，已在
         # _api_call 修掉（实测 3/3 逐字正确）。留着它们只会让
         # "DeepSeek 原始回答 ≠ 最终发送内容"，且可能改动事实与专名。

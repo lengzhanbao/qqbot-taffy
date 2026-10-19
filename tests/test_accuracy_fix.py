@@ -110,24 +110,6 @@ def test_generated_memory_disabled_by_default():
     assert bridge_qq.ENABLE_GENERATED_MEMORY is False
 
 
-def test_bin_fmvp_false_statement_cleaned():
-    fixed = bridge_qq._fix_known_phrase_errors(
-        "Bin是S13世界赛FMVP，也是S13夺冠大佬", "bin"
-    )
-    assert "S13世界赛FMVP" not in fixed
-    assert "S13夺冠大佬" not in fixed
-    assert "职业上单" in fixed
-
-
-def test_doubao_single_char_shortening_is_restored():
-    reply = "豆包X是塔菲，豆包85倍，有豆包探路，敢说豆包包包，塔菲也认了"
-    fixed = bridge_qq._fix_known_phrase_errors(reply, "你怎么看豆包")
-    assert "豆包X" not in fixed
-    assert "豆包85倍" in fixed
-    assert "有豆包探路" in fixed
-    assert "说豆包，" in fixed
-
-
 def test_entity_name_guard_in_prompts():
     assert "不谐音" in bridge_qq.SEARCH_STRATEGY_SYSTEM
     assert "不玩梗改名" in bridge_qq.TOOL_FINAL_SYSTEM
@@ -362,25 +344,10 @@ def test_lyric_reply_suspect_checks_memory_key_lines():
         good, "林俊杰和热狗合唱的加油歌词是什么", "", memory)
 
 
-def test_known_phrase_error_fix_xuanwu():
-    assert bridge_qq._fix_known_phrase_errors(
-        "不是玄武神，也不是南京玄武区", "玄武口音是什么梗") == \
-        "不是玄武神兽，也不是南京玄武区"
-    assert "费兰·托雷斯" in bridge_qq._fix_known_phrase_errors(
-        "干·托雷斯打进制胜球", "2026世界杯冠军是谁")
-    assert "5.6万" in bridge_qq._fix_known_phrase_errors(
-        "但.6万条二创", "竹知了是什么梗")
-
-
-def test_numeric_fact_preservation_and_prompt():
+def test_prompt_and_context_budgets():
+    """2026-10-19：原用例还测 _ensure_numeric_facts_preserved，
+    该函数（0 调用点、含对话衍生修正）已移除，这里只保留仍有效的断言。"""
     assert "永雏塔菲" in bridge_qq.SYSTEM_PROMPT
-    source = "鸿蒙智行监测到5.6万余条，实际投诉171条，下架144条"
-    assert "5.6万余条" in bridge_qq._ensure_numeric_facts_preserved(
-        "但.6万余条二创", source)
-    assert "171条" in bridge_qq._ensure_numeric_facts_preserved(
-        "实际投诉71条", source)
-    assert "144条" in bridge_qq._ensure_numeric_facts_preserved(
-        "下架44条", source)
     assert bridge_qq.MAX_PAGE_TEXT_CHARS >= 12000
     assert bridge_qq.MAX_LYRIC_CONTEXT_CHARS >= 24000
 
@@ -395,38 +362,6 @@ def test_unsupported_numeric_phrases_detect_hallucination():
         "2019年加入EDG.Y",
         "2019年加入EDG.Y",
     ) == []
-
-
-def test_entity_fact_preservation_fixes_jax():
-    reply = bridge_qq._ensure_entity_facts_preserved(
-        "青钢影人柱力，某选手名残缺这些英雄玩得贼溜",
-        "贾克斯、青钢影人柱力、剑姬",
-    )
-    assert "贾克斯" in reply
-    unchanged = bridge_qq._ensure_entity_facts_preserved(
-        "贾玲导演的《你好，李焕英》",
-        "贾克斯",
-    )
-    assert "贾玲" in unchanged
-
-
-def test_entity_fact_preservation_fixes_song_names():
-    reply = bridge_qq._ensure_entity_facts_preserved(
-        "邓紫棋《年之外》，陈奕《富士山下》，林俊杰《修炼》",
-        "邓紫棋《光年之外》，陈奕迅《富士山下》，林俊杰《修炼爱情》",
-    )
-    assert "光年之外" in reply
-    assert "陈奕迅" in reply
-    assert "修炼爱情" in reply
-
-
-def test_source_phrase_preservation_fixes_jiejie():
-    reply = bridge_qq._ensure_source_phrases_preserved(
-        "201EDG.Y开启职业生涯，同年G一队",
-        "2019年加入EDG.Y，同年上调至EDG一队",
-    )
-    assert "2019年加入EDG.Y" in reply
-    assert "同年上调至EDG一队" in reply
 
 
 def test_pathological_repetition_is_cleaned_from_history_and_reply():
@@ -447,13 +382,6 @@ def test_pathological_repetition_is_cleaned_from_history_and_reply():
 def test_song_recommendation_exact_names():
     assert bridge_qq._is_song_recommendation_query("我要听歌喵")
     assert bridge_qq._is_song_recommendation_query("推荐几首新歌")
-    reply = bridge_qq._ensure_source_phrases_preserved(
-        "陈奕《富士山下》，林俊杰《修炼》，邓紫棋《年之外》",
-        bridge_qq._song_recommendation_source(),
-    )
-    assert "陈奕迅" in reply
-    assert "修炼爱情" in reply
-    assert "光年之外" in reply
     assert bridge_qq._song_recommendation_broken(
         "某歌曲名残缺")
     assert bridge_qq._song_recommendation_broken(
@@ -586,16 +514,13 @@ def test_person_bio_fallback_for_meiko():
     # 2026-10-17：乱码判断改为只看结构（引号/书名号配对、日期串错），
     # 不再按内容黑名单。人物小传类残缺由 _person_bio_broken 负责。
     assert bridge_qq._person_bio_broken(
-        "M跑题了meiko，1998年6月6日",
+        "这段回答跑题了meiko，1998年6月6日",
         "meiko",
     )
     assert not bridge_qq._looks_garbled_reply(
-        "某段跑题的残缺回答：M跑题了meiko")
-    sanitized = bridge_qq._sanitize_history_content(
-        "某段跑题的残缺回答：M跑题了meiko，1998年6月6日",
-        "assistant",
-    )
-    assert "田野" in sanitized
+        "某段跑题的残缺回答：这段回答跑题了meiko")
+    # 2026-10-19：原先还断言 _sanitize_history_content 会把残缺内容补成
+    # 完整人名，那依赖已移除的对话衍生修正表，不再断言。
 
 
 def test_refine_polluted_history_keeps_info():
@@ -655,26 +580,6 @@ def test_garbled_date_patterns_are_detected():
     assert bridge_qq._looks_garbled_reply("周杰伦《七里香》是2003年,4年发行")
     assert bridge_qq._looks_garbled_reply("周杰伦《七里香》是2003年，4年发行")
     assert bridge_qq._looks_garbled_reply("2026年6月14日24日6年7月24日")
-
-
-def test_fix_known_phrase_errors_fixes_wufu_typo():
-    fixed = bridge_qq._fix_known_phrase_errors("玄歯口音这个梗", "玄武口音")
-    assert "玄武口音" in fixed
-
-
-def test_reply_context_sanitizes_recent_bin_typos():
-    dirty = (
-        "Bin哥厉害的微博_微博最近状态不好，"
-        "谢谢队伊（星标准发音为英式）和队友对我的体和容，文件!"
-    )
-    cleaned = bridge_qq._sanitize_history_content(dirty, "assistant")
-    assert "Bin哥的微博" in cleaned
-    assert "队伊（星标准发音为英式）" not in cleaned
-    assert "体谅与包容" in cleaned
-    assert "文件!" not in cleaned
-    fixed = bridge_qq._fix_known_phrase_errors("网路黑话不是真话", "bin哥")
-    assert "网路黑话" not in fixed
-    assert "网络黑话" in fixed
 
 
 def test_answer_contract_generic_checks():
