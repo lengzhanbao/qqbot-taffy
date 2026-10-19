@@ -17,7 +17,7 @@ import sys
 import time
 import zipfile
 
-BASE = r"<项目根>"
+BASE = os.environ.get("QQBOT_ROOT") or os.getcwd()
 STAMP = "20261018"
 OUT_NAME = f"taffy_qqbot_review_{STAMP}.zip"
 STAGE = os.path.join(BASE, ".tmp", f"review_{STAMP}")
@@ -197,7 +197,7 @@ lines = ["# 项目结构与版本", "",
          "- 入口：`bridge_qq.py`（`main()`）",
          "- 启动脚本：`restart_bridge_hidden.py`（隐藏窗口启动 + 启动自检）",
          "- 连接：NapCat OneBot11 WebSocket（群消息）+ HTTP API（发送/取历史/取图）",
-         "- 运行目录：项目根 `<项目根>`；数据在 `data/`，日志在 `logs/`", "",
+         "- 运行目录：项目根；数据在 `data/`，日志在 `logs/`", "",
          "## 文件规模", ""]
 for name in COPIED:
     p = os.path.join(STAGE, name.rstrip("/"))

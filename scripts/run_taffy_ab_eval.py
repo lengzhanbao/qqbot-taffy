@@ -236,7 +236,7 @@ def main():
     output_dir = output_dir.resolve()
     temp_root = (ROOT / ".tmp").resolve()
     if temp_root not in output_dir.parents:
-        parser.error("output directory must stay under <项目根>\\.tmp")
+        parser.error("output directory must stay under the project .tmp")
     output_dir.mkdir(parents=True, exist_ok=False)
     print(f"model={app.DEEPSEEK_MODEL_REF} cases={min(args.max_cases, len(FIXED_CASES))} per_version max_tokens=180 output={output_dir}",
           flush=True)

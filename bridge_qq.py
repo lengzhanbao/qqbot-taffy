@@ -6139,7 +6139,7 @@ class Bridge:
         name = sender.get("card") or sender.get("nickname") or ""
         # 被引用的是**机器人自己**发过的消息时，必须显式标注。
         # 否则前缀用的是它的 QQ 昵称（如"某昵称"），它会认不出那是自己，
-        # 实测出现过"不知道这个某昵称是不是本尊，万一是别人顶着塔菲的名号"这种身份混乱。
+        # 实测出现过"不知道这个昵称是不是本尊，万一是别人顶着塔菲的名号"这种身份混乱。
         if sender_id and getattr(self, "self_id", None) and sender_id == str(self.self_id):
             prefix = "（这是你自己之前发的）"
         else:
@@ -8847,7 +8847,7 @@ class Bridge:
         ):
             # 2026-10-17：机器人自己的回复必须标成"塔菲"。
             # 原先用提问者昵称，回忆时会把塔菲的话当成群友说的
-            # （例如"群友甲: 才不是猫娘啦！"）。uid 仅供内部关联，不进提示词。
+            # （例如"某群友: 才不是猫娘啦！"）。uid 仅供内部关联，不进提示词。
             self._append_recent_group_context(
                 gid, uid, "塔菲", reply, role="assistant"
             )

@@ -38,7 +38,7 @@ def test_recent_group_context_persists_across_restart(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge_qq, "RECENT_GROUP_CONTEXT_FILE", str(path))
 
     first = _empty_bridge()
-    first._append_recent_group_context("100000001", "3000000001", "周杰伦", "我感觉江西考研比南京简单")
+    first._append_recent_group_context("100000001", "3000000001", "群友甲", "我感觉江西考研比南京简单")
     first._append_recent_group_context("100000001", "3000000002", "群友乙", "考完去实习")
     first._flush_recent_group_context(force=True)
 
@@ -92,7 +92,7 @@ def test_restart_keeps_group_context_reaching_the_model(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge_qq, "_answer_cache_get", lambda *a, **k: None)
 
     writer = _empty_bridge()
-    writer._append_recent_group_context("100000001", "3000000001", "周杰伦", "我感觉江西考研比南京简单")
+    writer._append_recent_group_context("100000001", "3000000001", "群友甲", "我感觉江西考研比南京简单")
     writer._append_recent_group_context("100000001", "3000000002", "群友乙", "考完去实习")
     writer._flush_recent_group_context(force=True)
 

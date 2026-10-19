@@ -17,7 +17,7 @@ import re
 import sys
 import time
 
-BASE = r"<项目根>"
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 os.environ["QQ_TEST_MODE"] = "1"
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")

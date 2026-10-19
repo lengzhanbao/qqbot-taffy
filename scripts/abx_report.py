@@ -6,7 +6,7 @@ import os
 import statistics
 import sys
 
-BASE = r"<项目根>"
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 out_dir = sys.argv[1] if len(sys.argv) > 1 else sorted(
     glob.glob(os.path.join(BASE, ".tmp", "abx-*")))[-1]
 rows = json.load(open(os.path.join(out_dir, "samples.json"), encoding="utf-8"))

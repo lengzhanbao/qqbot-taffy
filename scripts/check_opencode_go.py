@@ -2,7 +2,7 @@
 """OpenCode Go 联通自检：确认 .env 里的 key 是否已有 Go 套餐订阅。
 
 用法（项目实际使用的解释器）：
-    <用户目录>\\AppData\\Local\\Programs\\Python\\Python311\\python.exe scripts\\check_opencode_go.py
+    <python.exe> scripts\\check_opencode_go.py
 
 退出码：0=Go 可用，1=未订阅或不可用。
 """
@@ -93,7 +93,7 @@ def main():
     else:
         print("[√] Go 套餐可用（本次没返回正文，属模型偶发空回复，重跑一次即可）")
     print("\n现在重启桥接即可让机器人在线使用它：")
-    print(r"   Start-Process -FilePath '<用户目录>\AppData\Local\Programs\Python\Python311\pythonw.exe' "
+    print(r"   Start-Process -FilePath '<pythonw.exe>' "
           r"-ArgumentList 'restart_bridge_hidden.py' -WorkingDirectory '<项目根>' -WindowStyle Hidden")
     return 0
 

@@ -9,7 +9,7 @@ import re
 import sys
 import time
 
-BASE = r"<项目根>"
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 # 注意：**不能**设 QQ_TEST_MODE=1 —— 那会把 RUNTIME_DIR 指到 .tmp/test-runtime，
 # 读不到真实的 bridge_sessions.json / recent_group_context.json。
