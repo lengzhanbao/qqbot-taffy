@@ -201,7 +201,7 @@ chore: add utility and test scripts
 
 文件：
 
-- `scripts/clean_polluted_data.py`
+- `scripts/clean_polluted_data.py`（已移除：一次性修数据脚本，内含真实群号与对话记录，不进仓库）
 - `scripts/test_20_questions.py`
 - `scripts/test_20_questions_2026.py`
 - `scripts/test_random_5.py`
