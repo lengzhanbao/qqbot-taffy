@@ -1,6 +1,7 @@
 ﻿# QQBot 项目恢复：只从 项目根目录 backups/ 读取，恢复前自动备份当前文件。
 param(
-    [string]$BackupPath = ""
+    [string]$BackupPath = "",
+    [switch]$CodeOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -69,6 +70,21 @@ New-Item -ItemType Directory -Force -Path $beforeDir | Out-Null
 $relativeFiles = @(
     "bridge_qq.py",
     ".env",
+    "qqbot_core/__init__.py",
+    "qqbot_core/config.py",
+    "qqbot_core/evaluation.py",
+    "qqbot_core/group_policy.py",
+    "qqbot_core/knowledge.py",
+    "qqbot_core/learning.py",
+    "qqbot_core/memory.py",
+    "qqbot_core/observer.py",
+    "qqbot_core/prompts.py",
+    "qqbot_core/routing.py",
+    "qqbot_core/safety.py",
+    "qqbot_core/stats.py",
+    "qqbot_core/style.py",
+    "qqbot_core/text.py",
+    "qqbot_core/topics.py",
     "data/bridge_sessions.json",
     "data/bridge_sessions_archive.json",
     "data/bot_memory.md",
@@ -85,6 +101,10 @@ $relativeFiles = @(
     "scripts/restore.ps1",
     "scripts/status.ps1",
     "restart_bridge_hidden.py",
+    "restart_napcat.ps1",
+    "launch_napcat_hidden.ps1",
+    "start_bridge_on_boot.ps1",
+    "register_startup_task.ps1",
     "AGENTS.md",
     "README.md",
     "shell/config/onebot11_*.json",
@@ -105,8 +125,21 @@ if (Test-Path -LiteralPath $manifestPath) {
     }
 }
 
+if ($CodeOnly) {
+    $relativeFiles = @($relativeFiles | Where-Object {
+        $_ -match '\.py$|^requirements[^/\\]*\.txt$|^scripts[/\\][^/\\]+\.ps1$|^config[/\\]\.env\.example$'
+    })
+    Write-Output "仅恢复源码；跳过配置密钥、会话、授权和记忆数据。"
+}
+
 $restored = @()
 foreach ($rel in $relativeFiles) {
+    $targetPath = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot $rel))
+    $sourcePath = [System.IO.Path]::GetFullPath((Join-Path $resolvedBackupFull $rel))
+    if (-not $targetPath.StartsWith($ProjectRoot + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not $sourcePath.StartsWith($resolvedBackupFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "备份清单包含越界路径，恢复已中止"
+    }
     $src = Join-Path $resolvedBackupFull $rel
     $sources = @()
     if ($rel -match '[\*\?]') {

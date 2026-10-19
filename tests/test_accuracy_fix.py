@@ -39,7 +39,9 @@ def test_glm_body_does_not_force_disable_thinking(monkeypatch):
         "sys", [], model_refs=["glm/glm-4.5-flash"]))
 
     assert bodies
-    assert "thinking" not in bodies[0]
+    # 2026-10-17 实测：GLM 不传 thinking 时会烧完 token 却返回空正文
+    # （temp0.85 变体：正文 0 字 / tokens=200），因此首次就必须显式关闭思考。
+    assert bodies[0].get("thinking") == {"type": "disabled"}
 
 
 def test_glm_empty_thinking_retries_with_disabled_thinking(monkeypatch):
@@ -62,7 +64,8 @@ def test_glm_empty_thinking_retries_with_disabled_thinking(monkeypatch):
 
     assert reply == "思考后没正文，改用直答"
     assert len(bodies) == 2
-    assert "thinking" not in bodies[0]
+    # 首次与重试都应关闭思考（GLM 默认会返回空正文）
+    assert bodies[0].get("thinking") == {"type": "disabled"}
     assert bodies[1].get("thinking") == {"type": "disabled"}
 
 
@@ -91,10 +94,16 @@ def test_exact_search_skips_local_variant_builder(monkeypatch):
     assert result == ""
 
 
-def test_free_models_are_prioritized():
-    assert bridge_qq.MODELS[0].startswith("opencode_free/")
-    assert bridge_qq.MODELS_FACTUAL[0].startswith("opencode_free/")
-    assert bridge_qq.MODELS_CASUAL[0].startswith("opencode_free/")
+def test_all_model_pools_use_the_current_final_model():
+    """2026-10-16：辅助调用不再混用免费池。
+
+    实测免费池大量 400/403，一次会话摘要被拖到 39.8 秒；现在摘要、成文、
+    事实/闲聊生成全部走当前模型（MODELS_FINAL）。
+    """
+    assert bridge_qq.MODELS == bridge_qq.MODELS_FINAL
+    assert bridge_qq.MODELS_FACTUAL == bridge_qq.MODELS_FINAL
+    assert bridge_qq.MODELS_CASUAL == bridge_qq.MODELS_FINAL
+    assert not bridge_qq.MODELS[0].startswith("opencode_free/")
 
 
 def test_generated_memory_disabled_by_default():
@@ -465,7 +474,7 @@ def test_truncate_only_at_sentence_boundary():
         "第一句。第二句还没写完", 5) == "第一句。"
     assert bridge_qq._truncate_at_sentence(
         "没有句号的长内容没有句号的长内容", 5) == \
-        "没有句号的长内容没有句号的长内容"
+        "没有句号…"
 
 
 def test_search_query_clean_and_tool_residue():
@@ -478,11 +487,17 @@ def test_search_query_clean_and_tool_residue():
     assert variants[0] == q
     assert bridge_qq._looks_like_tool_call(
         '{"queries": ["日本央行 加息"]}')
-    assert bridge_qq._looks_like_tool_call(
+    # 2026-10-17：只认完整专用协议结构。普通 JSON（含 query / count / source /
+    # recency_days 等字段）不再判成工具残留——正常技术回复会包含这些字段。
+    assert not bridge_qq._looks_like_tool_call(
         '{"query": "NVIDIA market cap", "recency_days": 30}')
-    assert bridge_qq._looks_like_tool_call(
+    assert not bridge_qq._looks_like_tool_call(
         '搜索中...\n```json\n'
         '{"query": "高考志愿填报 选专业", "count": 8, "source": "cn.bing"}\n```')
+    assert bridge_qq._looks_like_tool_call(
+        '{"queries": [{"query": "英伟达市值", "purpose": "行情"}]}')
+    assert not bridge_qq._looks_like_tool_call(
+        "plan_search 是这套系统里的搜索规划步骤，用来把问题拆成查询词。")
     assert bridge_qq._is_weak_reply(
         "塔菲再搜一下最新数据！", "英伟达市值")
 
@@ -568,11 +583,13 @@ def test_person_bio_fallback_for_faker():
 
 def test_person_bio_fallback_for_meiko():
     assert bridge_qq._person_bio_key("介绍一下meiko") == "meiko"
+    # 2026-10-17：乱码判断改为只看结构（引号/书名号配对、日期串错），
+    # 不再按内容黑名单。人物小传类残缺由 _person_bio_broken 负责。
     assert bridge_qq._person_bio_broken(
         "M跑题了meiko，1998年6月6日",
         "meiko",
     )
-    assert bridge_qq._looks_garbled_reply(
+    assert not bridge_qq._looks_garbled_reply(
         "某段跑题的残缺回答：M跑题了meiko")
     sanitized = bridge_qq._sanitize_history_content(
         "某段跑题的残缺回答：M跑题了meiko，1998年6月6日",
@@ -844,9 +861,18 @@ def test_repeated_search_snippet_triggers_self_check():
 
 
 def test_bad_final_reply_and_qa_context_guards():
-    assert bridge_qq._reject_bad_final_reply(
+    # 2026-10-17：只认完整专用协议结构。含 "query"/"count"/"source" 的普通 JSON
+    # 不再被判成工具残留（正常技术回复会包含这些字段）。
+    assert not bridge_qq._reject_bad_final_reply(
         '搜索中...\n```json\n'
         '{"query": "高考志愿填报 选专业", "count": 8, "source": "cn.bing"}\n```')
+    # 2026-10-17：正常聊天不再解析工具协议。用户完全可能让模型输出
+    # 合法的工具调用示例 JSON，那是正文内容，不是残留。
+    assert not bridge_qq._reject_bad_final_reply(
+        '{"queries": [{"query": "高考志愿填报 选专业", "purpose": "填报"}]}')
+    assert not bridge_qq._reject_bad_final_reply(
+        '{"arguments": {"keyword": "你好"}}')
+    assert not bridge_qq._reject_bad_final_reply('{"tool_calls": []}')
     assert not bridge_qq._reject_bad_final_reply(
         "塔菲根据搜索结果给出正常回答。")
     assert not bridge_qq._has_pathological_repetition(
@@ -921,10 +947,9 @@ def test_search_source_marker_is_appended():
         "答案是西班牙", True).endswith("（联网搜过喵）")
     assert bridge_qq._append_search_source_marker(
         "塔菲没搜到可靠结果", False, True).endswith(
-        "（联网搜了但没查到，塔菲凭现有知识答的喵）")
+        "（联网未找到可靠结果，塔菲暂时不确定喵）")
     assert bridge_qq._append_search_source_marker(
-        "塔菲凭知识答", False).endswith(
-        "（没联网，塔菲凭现有知识答的喵）")
+        "塔菲凭知识答", False) == "塔菲凭知识答"
 
 
 def test_distill_drops_generic_year_pages_for_champion_query():

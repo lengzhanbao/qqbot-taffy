@@ -17,6 +17,36 @@ class TestStreamParse:
         assert finish_reason == "length"
         assert web_search == []
 
+    def test_json_diagnostics_keep_pre_clean_chars_reason_and_usage(self):
+        diagnostics = {}
+        lines = [
+            '{"choices":[{"message":{"content":"  原始正文\\n"},'
+            '"finish_reason":"length"}],"usage":{"completion_tokens":17}}'
+        ]
+        content, *_ = _bridge()._parse_stream_response(lines, diagnostics=diagnostics)
+        assert content == "原始正文"
+        assert diagnostics == {
+            "raw_chars": len("  原始正文\n"),
+            "finish_reason": "length",
+            "completion_tokens": 17,
+        }
+
+    def test_stream_diagnostics_include_usage_only_chunk(self):
+        diagnostics = {}
+        lines = [
+            'data: {"choices":[{"delta":{"content":"正文"}}]}',
+            'data: {"choices":[{"delta":{"content":"续写"},"finish_reason":"length"}]}',
+            'data: {"choices":[],"usage":{"completion_tokens":23}}',
+            "data: [DONE]",
+        ]
+        content, *_ = _bridge()._parse_stream_response(lines, diagnostics=diagnostics)
+        assert content == "正文续写"
+        assert diagnostics == {
+            "raw_chars": len("正文续写"),
+            "finish_reason": "length",
+            "completion_tokens": 23,
+        }
+
     def test_json_content_tool_call_text_is_recovered(self):
         lines = [
             '{"choices":[{"message":{"content":"{\\"queries\\":[{\\"query\\":\\"2026世界杯 冠军\\",\\"purpose\\":\\"冠军\\"}]}"},"finish_reason":"stop"}]}'

@@ -19,7 +19,7 @@ def _make_bridge(monkeypatch):
     bridge.send_group_msg = AsyncMock()
     bridge.send_private_msg = AsyncMock()
     bridge.send_group_text = AsyncMock()
-    bridge._fetch_reply_context = AsyncMock(return_value="")
+    bridge._fetch_reply_context = AsyncMock(return_value=("", []))
     monkeypatch.setattr(bridge_qq, "_try_self_improve", lambda *a, **k: None)
     return bridge
 
@@ -44,6 +44,7 @@ def test_group_at_message_triggers_llm_and_reply(monkeypatch):
     _run(bridge._process_group(ev))
     bridge.send_group_msg.assert_awaited_once()
     bridge.ask_model.assert_awaited_once()
+    assert bridge.ask_model.await_args.kwargs["speaker_id"] == "10001"
 
 
 def test_private_message_triggers_llm_and_reply(monkeypatch):
@@ -137,8 +138,9 @@ def test_non_admin_command_is_ignored(monkeypatch):
 def test_reply_message_context_is_kept_in_prompt(monkeypatch):
     bridge = _make_bridge(monkeypatch)
     monkeypatch.setattr(bridge_qq, "SEND_THINKING", False)
+    # 2026-10-18：改为返回 (文本, 图片地址列表)
     bridge._fetch_reply_context = AsyncMock(
-        return_value="这是被引用的原始内容")
+        return_value=("这是被引用的原始内容", []))
     ev = {
         "message_type": "private",
         "user_id": 10001,

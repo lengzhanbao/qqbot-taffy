@@ -14,6 +14,6 @@ def test_startup_checks_callable():
     assert callable(getattr(bridge_qq, "run_startup_checks", None))
 
 
-def test_startup_checks_returns_bool():
-    result = bridge_qq.run_startup_checks()
-    assert isinstance(result, bool)
+def test_startup_checks_pass_internal_checks(monkeypatch):
+    monkeypatch.setattr(bridge_qq, "_onebot_http_probe", lambda: True)
+    assert bridge_qq.run_startup_checks() is True

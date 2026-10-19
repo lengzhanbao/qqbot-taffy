@@ -15,6 +15,12 @@ class TestWeakReply:
     def test_short_factual_reply_is_weak(self):
         assert _is_weak_reply("梅西", "梅西是谁")
 
+    def test_short_social_reply_is_accepted(self):
+        assert not _is_weak_reply("111大哥真送吗", "扣1送地狱火")
+
+    def test_short_chitchat_reply_is_accepted(self):
+        assert not _is_weak_reply("小菲在呢", "你怎么不回答了喵")
+
     def test_guide_reply_without_exact_entity_still_passes(self):
         assert not _is_weak_reply(
             "前往草系道馆完成挑战，再去徽章密室击败守护精灵，成功拿到草系徽章才算解锁，之后继续推进下一关。",

@@ -4,12 +4,16 @@ on: [push, pull_request]
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # bridge_qq 依赖 ctypes.wintypes（Windows 专属），只能在 windows 跑
+    runs-on: windows-latest
+    env:
+      QQ_TEST_MODE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
       - name: Install dependencies
         run: |
           pip install -r requirements.txt -r requirements-dev.txt

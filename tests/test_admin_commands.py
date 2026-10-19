@@ -69,7 +69,7 @@ class TestCommands:
     def test_model(self):
         bridge_qq.ADMIN_UIDS = {"123"}
         reply = bridge_qq.handle_admin_command("!model", "123")
-        assert "opencode_free/deepseek-v4-flash-free" in reply
+        assert bridge_qq.MODELS_FINAL[0] in reply
         assert "当前模型顺序" in reply
 
     def test_unknown_command(self):

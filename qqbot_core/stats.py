@@ -6,7 +6,8 @@ from datetime import datetime
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STATS_FILE = os.path.join(BASE_DIR, "data", "stats.json")
+_RUNTIME_DIR = (os.environ.get("QQ_TEST_DATA_DIR") or os.path.join(BASE_DIR, ".tmp", "test-runtime")) if os.environ.get("QQ_TEST_MODE") == "1" else BASE_DIR
+STATS_FILE = os.path.join(_RUNTIME_DIR, "data", "stats.json")
 _stats_lock = threading.Lock()
 _stats = {
     "total_messages": 0,

@@ -26,6 +26,9 @@ def _make_bridge():
 def _reset_model_state(monkeypatch):
     monkeypatch.setattr(bridge_qq, "_model_health", {})
     monkeypatch.setattr(bridge_qq, "_provider_cooldown", {})
+    monkeypatch.setattr(bridge_qq, "_tool_model_cooldown", {})
+    monkeypatch.setattr(bridge_qq, "inc_stat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bridge_qq, "write_health", lambda **kwargs: None)
 
 
 def _run(coro):
@@ -45,6 +48,9 @@ def _tool_call(name="search_web"):
 
 
 class TestComplete:
+    def test_final_user_facing_pool_contains_only_deepseek(self):
+        assert bridge_qq.MODELS_FINAL == [bridge_qq.DEEPSEEK_MODEL_REF]
+
     def test_returns_first_valid_reply(self, monkeypatch):
         bridge = _make_bridge()
         calls = []
@@ -136,6 +142,7 @@ class TestComplete:
         assert bridge_qq._model_health[FIRST] == -1
 
     def test_discards_weak_reply(self, monkeypatch):
+        monkeypatch.setattr(bridge_qq, "REJECTION_GATES", True)  # 旧拒答行为，属回滚路径
         bridge = _make_bridge()
 
         def fake(self, body, api_url, api_key):
@@ -151,6 +158,7 @@ class TestComplete:
         assert "洛克王国" in reply
 
     def test_weak_penalty_is_single(self, monkeypatch):
+        monkeypatch.setattr(bridge_qq, "REJECTION_GATES", True)  # 旧拒答行为，属回滚路径
         bridge = _make_bridge()
 
         def fake(self, body, api_url, api_key):
@@ -181,6 +189,7 @@ class TestComplete:
         assert FIRST in bridge_qq._provider_cooldown
 
     def test_discards_below_min_length(self, monkeypatch):
+        monkeypatch.setattr(bridge_qq, "REJECTION_GATES", True)  # 旧长度拒答，属回滚路径
         bridge = _make_bridge()
 
         def fake(self, body, api_url, api_key):
@@ -435,5 +444,117 @@ class TestSortModels:
         assert ordered[0] == SECOND
 
     def test_base_order_when_health_tied(self, monkeypatch):
-        ordered = bridge_qq._sort_models([SECOND, FIRST])
-        assert ordered[0] == FIRST
+        """健康度相同时按基准顺序（基准来自 MODELS_FINAL，这里直接给定基准）。
+
+        不依赖运行环境：测试模式不加载 .env，模型池可能只有一个模型。
+        """
+        monkeypatch.setattr(bridge_qq, "_MODEL_BASE_ORDER",
+                            {"glm/first-choice": 0, "glm/second-choice": 1})
+        ordered = bridge_qq._sort_models(["glm/second-choice", "glm/first-choice"])
+        assert ordered[0] == "glm/first-choice"
+
+
+def test_expired_turn_deadline_skips_provider_attempts(monkeypatch):
+    bridge = _make_bridge()
+    calls = []
+
+    def fake(self, body, api_url, api_key):
+        calls.append(body["model"])
+        return _ok()
+
+    monkeypatch.setattr(bridge_qq.Bridge, "_api_call", fake)
+    reply, model = _run(bridge._complete(
+        "sys", [], model_refs=[FIRST, SECOND], deadline=time.monotonic() - 1))
+
+    assert reply == ""
+    assert model == ""
+    assert calls == []
+
+
+def test_auth_failure_cools_down_provider_family(monkeypatch):
+    bridge_qq._mark_model_failure(FIRST, "http_401")
+    assert bridge_qq._provider_blocked(FIRST)
+    assert bridge_qq._provider_blocked(SECOND)
+    assert not bridge_qq._provider_blocked("opencode_free/example")
+
+
+def test_model_pool_is_the_current_model_without_free_tier_entries():
+    """2026-10-16：所有调用统一走当前模型，不再混用免费池。
+
+    实测免费池大量返回 400/403，一次会话摘要被拖到 39.8 秒。
+    """
+    assert bridge_qq.MODELS == bridge_qq.MODELS_FINAL
+    assert not any(m.startswith("opencode_free/") for m in bridge_qq.MODELS)
+    for broken in ("opencode_free/mimo-v2.5-free",
+                   "opencode_free/mimo-v2.6-flash-free",
+                   "opencode_free/laguna-s-2.1-free",
+                   "opencode_free/longcat-2.5-preview-free"):
+        assert broken not in bridge_qq.MODELS
+    assert "opencode_free/longcat-2.0-free" not in bridge_qq.MODELS
+    assert "opencode_free/ling-3.0-flash-free" not in bridge_qq.MODELS
+
+
+def test_tool_schema_failure_only_cools_down_tool_planning():
+    bridge_qq._mark_model_failure(FIRST, "http_400", with_tools=True)
+    assert bridge_qq._tool_model_cooldown[FIRST] > time.time()
+    assert not bridge_qq._provider_blocked(FIRST)
+
+
+def test_model_semaphore_caps_concurrent_api_calls(monkeypatch):
+    bridge = _make_bridge()
+    bridge.model_semaphore = asyncio.Semaphore(2)
+    lock = __import__("threading").Lock()
+    state = {"active": 0, "peak": 0}
+
+    def fake(self, body, api_url, api_key):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.03)
+        with lock:
+            state["active"] -= 1
+        return _ok("这是一个足够完整的测试回复")
+
+    monkeypatch.setattr(bridge_qq.Bridge, "_api_call", fake)
+
+    async def run_many():
+        return await asyncio.gather(*[
+            bridge._complete("sys", [], model_refs=[FIRST])
+            for _ in range(8)
+        ])
+
+    results = _run(run_many())
+    assert all(reply for reply, _ in results)
+    assert state["peak"] <= 2
+
+
+def test_cancelled_api_call_closes_open_response(monkeypatch):
+    bridge = _make_bridge()
+
+    class Response:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    response = Response()
+
+    def blocked(self, body, api_url, api_key):
+        body["_response_holder"]["response"] = response
+        body["_cancel_event"].wait(1)
+        return "", "network", [], "", []
+
+    monkeypatch.setattr(bridge_qq.Bridge, "_api_call", blocked)
+
+    async def cancel_call():
+        task = asyncio.create_task(bridge._run_api_call(
+            {}, "https://example.invalid", "test-key",
+            deadline=time.monotonic() + 2,
+        ))
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(cancel_call())
+    assert response.closed
