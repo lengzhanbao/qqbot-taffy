@@ -1,143 +1,200 @@
-# QQBot
+# QQBot · 永雏塔菲
 
-基于 NapCat + OneBot v11 + Python 的 QQ 群机器人，角色固定为永雏塔菲。
+基于 **NapCat + OneBot v11 + Python** 的 QQ 群机器人，角色固定为**永雏塔菲**（中文虚拟主播）的同人 AI 群友。
+
+**它不是本人，也不是官方账号。**
+
+设计原则：**多保留人物特征，少干预模型的表达自由。**
+人格只描述"她是谁、怎么说话"，不规定"每句话必须怎么写"——不设字数上限、不做口癖配额、不写必须加表情。
+
+---
 
 ## 目录
 
-- `bridge_qq.py`：主桥接，NapCat WebSocket 到模型 API
-- `qqbot_core/`：模块化核心包，目前包含 stats、safety、learning
-- `scripts/backup.ps1`：备份项目关键文件到 `backups/`
-- `scripts/restore.ps1`：从 `backups/` 恢复，恢复前自动备份当前文件
-- `scripts/status.ps1`：读取 `data/health.json` 查看机器人健康状态
-- `docs/public/`：可进入 Git 的脱敏文档
-- `docs/`：本地计划、学习记录、Prompt 文档、问答对照等资料，不进入 Git
-- `config/.env.example`：环境变量示例，真实 `.env` 在项目根目录
-- `tests/`：pytest 测试
-- `demo/`：脱敏 demo 说明与构建产物
-- `backups/`：所有备份
-- `AGENTS.md`：项目级约束，包含存储和删除确认规则
+- [能力](#能力)
+- [架构](#架构)
+- [目录结构](#目录结构)
+- [快速开始](#快速开始)
+- [配置](#配置)
+- [测试](#测试)
+- [隐私边界](#隐私边界)
+- [已知限制](#已知限制)
+- [开源协议](#开源协议)
 
-详细文档：
+---
 
-- [架构设计](docs/public/ARCHITECTURE.md)
-- [面试准备](docs/public/INTERVIEW.md)
-- [模块职责导览](docs/public/MODULE_GUIDE.md)
-- [完整函数清单](docs/public/MODULE_FUNCTIONS.md)
-- [复盘](docs/public/复盘_15天计划.md)
-- [贡献指南](CONTRIBUTING.md)
+## 能力
 
-开源协议：MIT，见 [LICENSE](LICENSE)
+| 能力 | 说明 |
+| --- | --- |
+| **塔菲人格** | 单一来源 `persona/taffy.md`，直接作为 system prompt。融合公开语料特征：优先 `taffy` 自称（不用"我"）、`喵` 的量感、`一只` 量词、事故播报感、表情习惯 |
+| **短期记忆** | 近期群聊窗口（默认 30 分钟 / 每群 60 条），落盘、重启不丢；**按授权版本隔离**，撤销授权后旧窗口不复用 |
+| **长期记忆** | 凝练入库（episodes）+ 相关性检索注入。内容由"触发消息 + 相邻证据"构成，并按覆盖率去重 |
+| **识图** | 群消息带图即可识图（含未被 @ 的图、被引用消息里的图）；仅接受 QQ 图片域名的 https 地址，先缩到 768px 再传 |
+| **@ 回复** | `TRIGGER=at`：被 @ 或私聊时正常回复 |
+| **主动接话** | 由**模型自己判断**是否开口，输出 `__QUIET__` 则沉默；代码只负责"是否允许说、是否太频繁" |
+| **群授权** | 逐群授权：`observe` / `knowledge_learning` / `knowledge_retrieval` / `style_learning` / `proactive_chat` |
 
-## 存储约定
+### 分工原则
 
-所有项目运行数据和备份都放在项目根目录：
+```
+"是否有自然切入点"  →  交给 DeepSeek
+"是否允许说话、是否太频繁、是否打断其他处理"  →  留给代码
+```
 
-- 会话：`data/bridge_sessions.json`
-- 长期记忆：`data/bot_memory.md`
-- 群风格画像：`data/group_profiles.json`
-- 日志：`logs/bridge.log`
-- 健康状态：`data/health.json`
-- 运行统计：`data/stats.json`
-- 临时自检文件：`.tmp`
-- 备份：`backups/`
+代码侧只保留工程边界：**群授权 · 夜间静默 · 冷却/防刷屏 · 安全 · 需联网核实不抢答 · 发送前对回复本身的安全检查**。
 
-## 隐私边界
+---
 
+## 架构
 
-- `data/`、`logs/`、`.env`、`backup_qq_session.ps1`、`restore_qq_session.ps1` 都不进入 Git。
-- 代码和测试中不使用真实 QQ 号、群号或成员名，统一使用测试占位号。
+```
+QQ 客户端
+   │
+NapCat（OneBot v11）
+   ├── WebSocket :3001  → 群/私聊消息事件
+   └── HTTP API  :6099  ← 发送消息 / get_msg / get_group_msg_history
+   │
+bridge_qq.py（主桥接）
+   ├── qqbot_core.observer      观察器：群消息窗口、话题、去重
+   ├── qqbot_core.routing       路由：意图、上下文需求、机会评分（仅观测）
+   ├── qqbot_core.persona       人格加载（核心人格 + 背景资料）
+   ├── qqbot_core.agent_memory  长期记忆：凝练、索引、召回
+   ├── qqbot_core.group_policy  群授权与版本
+   ├── qqbot_core.text          文本清洗与截断
+   └── qqbot_core.safety        安全检查
+   │
+模型 API（按顺序回退）
+   opencode/deepseek-v4.1-flash → opencode/longcat-2.5-preview-free → deepseek/deepseek-flash
+```
+
+### 两条回复路径
+
+```
+被 @（TRIGGER=at）
+  system  = 人格 + 当前日期（+ 需要联网时的搜索策略）
+  messages= 会话历史（按授权与相关性筛选）+ 本轮问题（带图则附多模态块）
+  后处理  = 格式清理 + 超长按句截断
+
+没被 @（主动接话）
+  system  = 人格 + 自主群聊接话原则
+  messages= 「群聊最近内容（按时间从早到晚）：昵称: 原话 … 最新消息：X」（带图则附多模态块）
+  决定    = 模型输出 __QUIET__ 则沉默，否则发送
+```
+
+---
+
+## 目录结构
+
+```
+bridge_qq.py                 主桥接（消息接收、请求组装、识图、主动接话、记忆调度）
+qqbot_core/                  核心包
+  ├── persona.py             人格加载与缓存
+  ├── observer.py            群消息观察器
+  ├── routing.py             路由与意图
+  ├── agent_memory.py        长期记忆（凝练 / 索引 / 召回）
+  ├── group_policy.py        群授权与版本
+  ├── knowledge.py           知识检索
+  ├── topics.py              话题维护
+  ├── text.py                文本清洗
+  ├── safety.py              安全检查
+  ├── config.py              配置常量
+  └── ...
+persona/
+  ├── taffy.md               当前人格（唯一来源）
+  ├── taffy_background.md    扩展背景（按话题检索注入）
+  └── taffy_b0/b1/b2/b3.md   历史版本存档
+tests/                       pytest（866 项）
+scripts/                     备份 / 恢复 / 状态 / 评估 / 审查包生成
+config/.env.example          环境变量示例（真实 .env 在项目根，不进 Git）
+docs/public/                 可进入 Git 的脱敏文档
+```
+
+---
 
 ## 快速开始
 
-1. 复制 `config\.env.example` 为 `.env`，填写 API Key。
-2. 启动 NapCat，确认 `3001/6099` 端口可用；端口可通过 `QQ_WS_URL`、`QQ_ONEBOT_HTTP_URL` 调整。
-3. 用隐藏方式启动桥接：
+1. 复制配置并填写 API Key：
 
 ```powershell
-Start-Process -FilePath "pythonw.exe" `
-    -ArgumentList "bridge_qq.py" `
-    -WorkingDirectory (Get-Location) `
-    -WindowStyle Hidden
+Copy-Item config\.env.example .env
+# 编辑 .env，填写 DEEPSEEK_API_KEY 等
 ```
+
+2. 启动 NapCat，确认端口可用（默认 `3001` WebSocket、`6099` HTTP）。
+
+3. 启动桥接（隐藏窗口）：
+
+```powershell
+python restart_bridge_hidden.py
+```
+
+4. 查看状态：
+
+```powershell
+.\scripts\status.ps1
+```
+
+### 逐群授权
+
+主动接话、记忆、识图都要求对应群已授权。授权前先确认群号，再写入 `data/group_policy.sqlite3`。
+
+---
+
+## 配置
+
+配置来自 `.env`（键名见 `config/.env.example`）。常用项：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `QQ_TRIGGER` | `at` | 触发方式：仅被 @ 时回复 |
+| `QQ_CASUAL_TEMPERATURE` / `QQ_FACTUAL_TEMPERATURE` | `0.85` / `0.7` | 闲聊与事实类温度 |
+| `QQ_CASUAL_TOP_P` / `QQ_FACTUAL_TOP_P` | `1.0` / `0.8` | top_p |
+| `QQ_MAX_OUTPUT_TOKENS` | `10000` | 生成预算 |
+| `QQ_PROACTIVE_GROUP_CHAT` | `0` | 主动接话总开关（需逐群授权） |
+| `QQ_PROACTIVE_DEBOUNCE` | `2.5` | 防抖：等群友把一段话说完（期间有新消息则重新计时） |
+| `QQ_PROACTIVE_GROUP_COOLDOWN` | `900` | 同群两次主动发言最小间隔（秒） |
+| `QQ_PROACTIVE_SELF_QUIET` | `300` | 自己说完后多久能再接（秒） |
+| `QQ_AGENT_MEMORY` | `0` | 长期记忆开关 |
+| `QQ_LEGACY_STYLE_LAYERS` | `0` | 旧风格层（L0–L3）回滚开关 |
+| `QQ_REJECTION_GATES` | `0` | 旧风格闸门回滚开关 |
+
+> 发送字符上限由 `MAX_REPLY_LEN` 控制（默认 4500，即 QQ 单条消息上限）。
+
+---
 
 ## 测试
 
 ```powershell
-python -m pytest tests/ -q
+python -m pytest tests -q
 ```
 
-梗/歌词搜索冒烟测试会真实联网并写入 `logs/bridge.log`：
+> **注意必须带 `tests` 参数**：不带路径时 pytest 会从项目根目录收集，在本项目会产生大量收集错误。
 
-```powershell
-python scripts/test_meme_search.py
-```
+当前：**866 项通过**。
 
-## Git
+---
 
-代码、测试和脚本纳入 Git；`.env`、会话、长期记忆、群画像、日志、健康状态和备份不提交，避免泄露隐私和运行时数据。
+## 隐私边界
 
-## 管理员命令
+- `data/`、`logs/`、`backups/`、`.tmp/`、`.env`、`*.sqlite3` **都不进入 Git**（见 `.gitignore`）。
+- 代码与测试中**不使用真实 QQ 号、群号或成员名**，统一使用占位号。
+- 仓库只包含**功能代码、人格文本与测试**，不含聊天记录、数据库、日志或密钥。
+- `.env` 中的密钥仅存在于本地。
 
-`QQ_ADMIN_UIDS` 中的用户可使用：
+---
 
-- `!status`：查看 PID、WebSocket、会话和最近错误
-- `!style 0|1|2|3`：设置抽象等级上限
-- `!taffy on|off`：开启或关闭塔菲风格
-- `!model`：查看当前模型顺序
-- `!forget`：清理当前群/私聊的会话记忆、长期记忆和群风格，清理前自动备份
-- `!clear_memory`：清空所有记忆，需二次确认，执行前自动备份
+## 已知限制
 
-非管理员发送这些指令会被静默忽略。
+1. **长期记忆命中率低** —— 凝练只认"明确事件/约定"（考试、报名、说定了…），日常闲聊很少命中。
+2. **凝练频率偏高** —— 空闲约 180 秒即尝试一次，日志噪音较大（多数产出 0 条）。
+3. **偶发空回复** —— 模型返回空且备选模型预算耗尽（实测约 2/24 次）。
+4. **夜间静默硬编码** —— `8:00–23:00` 之外不主动接话（只影响主动接话，@ 与私聊照常回复），目前不是配置项。
+5. **NapCat 可能自行掉线** —— 桥接启动自检含 OneBot HTTP 探测，探测失败会拒绝启动。
+6. **群风格学习已停用** —— 学习链路已移除，`group_profiles.json` 中的统计为历史快照。
 
-## 运行统计
+---
 
-`data/stats.json` 会记录：
+## 开源协议
 
-- 消息数、回复数、平均耗时
-- 模型调用、成功、失败、熔断次数
-- 搜索调用、成功、失败、缓存命中
-- 安全拦截次数
-
-查看：
-
-```powershell
-Get-Content -Raw -Encoding UTF8 data\stats.json
-```
-
-## 回答来源标注
-
-最终回答会追加：
-
-- `（联网搜过喵）`
-- `（联网搜了但没查到，塔菲凭现有知识答的喵）`
-- `（没联网，塔菲凭现有知识答的喵）`
-
-这样用户能直接判断答案是否经过网络搜索验证。
-
-## 搜索行为
-
-`QQ_ALWAYS_SEARCH=1` 时：
-
-- 搜索工具对所有消息开放。
-- 模型第一轮即使没调用搜索，也会忽略直接回复并强制走通用联网兜底。
-- 只有 `QQ_ALWAYS_SEARCH=0` 时，才可能保留模型未联网的直接回答。
-
-## 备份与恢复
-
-备份会包含 `shell/config` 下的 NapCat OneBot 配置，恢复后端口配置可一并还原。
-
-```powershell
-# 备份
-powershell -ExecutionPolicy Bypass -File scripts\backup.ps1 -Tag manual
-
-# 列出并选择备份
-powershell -ExecutionPolicy Bypass -File scripts\restore.ps1
-
-# 指定备份目录恢复
-powershell -ExecutionPolicy Bypass -File scripts\restore.ps1 -BackupPath backups\20260807_160000_manual
-
-# 查看健康状态
-powershell -ExecutionPolicy Bypass -File scripts\status.ps1
-```
-
-恢复前脚本会自动停止检查：如果桥接进程还在运行会拒绝执行。恢复前也会先把当前文件备份到 `backups/before_restore_时间戳`。
+MIT，见 [LICENSE](LICENSE)
