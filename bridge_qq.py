@@ -925,17 +925,18 @@ def _extract_esports_id(query):
 
 
 def _person_bio_broken(reply, key):
+    """人物简介是否残缺。
+
+    2026-10-19：原先还有两条按**具体内容**判断的行（针对某次残缺输出硬编码的
+    字符串），属于对话衍生的补丁，已删除。只保留通用检查：日期串错、必备字段缺失。
+    """
     text = reply or ""
     if key == "faker":
-        if "某处错字" in text or "某处夸张描述" in text:
-            return True
         if re.search(r"\d{4}年\d{1,2}月\d{1,2}日\d{1,2}年", text):
             return True
         if "李相赫" not in text or "1996" not in text:
             return True
     if key == "meiko":
-        if "某处跑题" in text or "M完全" in text or "某段跑题的残缺回答" in text:
-            return True
         if "田野" not in text or "1998" not in text:
             return True
     return False

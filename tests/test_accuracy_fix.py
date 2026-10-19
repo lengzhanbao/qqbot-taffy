@@ -382,8 +382,9 @@ def test_pathological_repetition_is_cleaned_from_history_and_reply():
 def test_song_recommendation_exact_names():
     assert bridge_qq._is_song_recommendation_query("我要听歌喵")
     assert bridge_qq._is_song_recommendation_query("推荐几首新歌")
+    # 用"括号不配对"这种纯结构触发，不依赖任何具体内容
     assert bridge_qq._song_recommendation_broken(
-        "某歌曲名残缺")
+        "邓紫棋《光年之外")
     assert bridge_qq._song_recommendation_broken(
         "这十首涵盖抒、摇滚、民谣")
     assert not bridge_qq._song_recommendation_broken(
@@ -518,7 +519,7 @@ def test_person_bio_fallback_for_meiko():
         "meiko",
     )
     assert not bridge_qq._looks_garbled_reply(
-        "某段跑题的残缺回答：这段回答跑题了meiko")
+        "某段跑题的残缺回答：meiko")
     # 2026-10-19：原先还断言 _sanitize_history_content 会把残缺内容补成
     # 完整人名，那依赖已移除的对话衍生修正表，不再断言。
 
