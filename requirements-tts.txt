@@ -1,0 +1,43 @@
+# TTS 环境依赖（独立于主程序环境）
+#
+# 说明：
+#   主程序用 Python 3.11；TTS 环境单独用 Python 3.10.20 + cu128 版 torch。
+#   RTX 50 系（sm_120）必须 cu128，低于它的轮子会报
+#   "sm_120 is not compatible with the current PyTorch installation"。
+#
+# 安装：
+#   python -m venv .venv-tts
+#   .venv-tts/Scripts/pip install torch==2.7.1 torchaudio==2.7.1 \
+#       --index-url https://download.pytorch.org/whl/cu128
+#   .venv-tts/Scripts/pip install -r requirements.txt   # Bert-VITS2 自己的清单
+#
+# 下面是本机实测可用的关键版本（Bert-VITS2 自己的 requirements.txt 不锁版本）。
+
+# 深度学习
+torch==2.7.1+cu128
+torchaudio==2.7.1+cu128
+transformers==4.44.2
+numpy==2.2.6
+numba==0.68.0
+
+# 中文文本处理（Bert-VITS2 的 text/ 与 oldVersion/V200 需要）
+jieba==0.42.1
+pypinyin==0.55.0
+cn2an==0.5.24
+Unidecode
+
+# 通用
+PyYAML==6.0.3
+requests==2.34.2
+librosa==0.9.2
+scipy
+loguru
+
+# 中文场景不需要日文/英文前端，但 Bert-VITS2 的 text/ 会 import，仍需装上：
+mecab-python3
+unidic-lite
+fugashi
+pyopenjtalk-prebuilt
+jaconv
+g2p_en
+sentencepiece
