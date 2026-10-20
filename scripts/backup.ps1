@@ -6,8 +6,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-if (-not $ProjectRoot.StartsWith("E:\", [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "备份脚本只允许在 E 盘项目中使用: $ProjectRoot"
+# 安全护栏：确认目标确实是本项目（用文件标记，不用盘符——盘符判断不可移植）
+if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "bridge_qq.py"))) {
+    throw "不是 QQBot 项目根目录（缺少 bridge_qq.py）: $ProjectRoot"
 }
 
 $BackupRoot = Join-Path $ProjectRoot "backups"
