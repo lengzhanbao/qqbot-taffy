@@ -3,3 +3,5 @@ requests>=2.31,<3
 beautifulsoup4>=4.12,<5
 DrissionPage>=4.0
 ddgs>=9,<10
+# Windows 没有系统时区库；qqbot_core.agent_memory 用 ZoneInfo("Asia/Shanghai")
+tzdata>=2024.1
