@@ -34,6 +34,8 @@
 | **@ 回复** | `TRIGGER=at`：被 @ 或私聊时正常回复 |
 | **主动接话** | 由**模型自己判断**是否开口，输出 `__QUIET__` 则沉默；代码只负责"是否允许说、是否太频繁" |
 | **群授权** | 逐群授权：`observe` / `knowledge_learning` / `knowledge_retrieval` / `style_learning` / `proactive_chat` |
+| **语音回复** | `taffy_speak` 工具：**DeepSeek 自己决定**发文字还是发语音；本地 Bert-VITS2（塔菲 V200 音色）合成，失败自动降级文字 |
+| **点歌** | `/点歌 <歌名>`：搜 QQ 音乐并发送音乐卡片（无需 @，与对话流程解耦） |
 
 ### 分工原则
 
@@ -62,6 +64,8 @@ bridge_qq.py（主桥接）
    ├── qqbot_core.agent_memory  长期记忆：凝练、索引、召回
    ├── qqbot_core.group_policy  群授权与版本
    ├── qqbot_core.text          文本清洗与截断
+   ├── qqbot_core.voice         语音工具（taffy_speak）与投递
+   ├── qqbot_core.music         点歌（QQ 音乐搜索 + 卡片）
    └── qqbot_core.safety        安全检查
    │
 模型 API（按顺序回退）
@@ -98,6 +102,8 @@ qqbot_core/                  核心包
   ├── topics.py              话题维护
   ├── text.py                文本清洗
   ├── safety.py              安全检查
+  ├── voice.py               语音工具与投递（SQLite 投递日志）
+  ├── music.py               点歌（搜索 + 卡片）
   ├── config.py              配置常量
   └── ...
 persona/
@@ -105,7 +111,8 @@ persona/
   ├── taffy_background.md    扩展背景（按话题检索注入）
   └── taffy_b0/b1/b2/b3.md   历史版本存档
 tests/                       pytest（866 项）
-scripts/                     备份 / 恢复 / 状态 / 评估 / 审查包生成
+services/taffy_tts.py        常驻语音服务（复用本地 Bert-VITS2，仅 127.0.0.1）
+scripts/                     备份 / 恢复 / 状态 / 评估 / 审查包生成 / 启动语音服务
 config/.env.example          环境变量示例（真实 .env 在项目根，不进 Git）
 docs/public/                 可进入 Git 的脱敏文档
 ```
@@ -163,6 +170,43 @@ python restart_bridge_hidden.py
 
 ---
 
+## 语音（可选，默认关闭）
+
+语音是**可选项**：TTS 服务没启动时，机器人照常文字聊天，不会报错。
+
+### 组成
+
+```
+E:\Bert-VITS2-master\        本地 Bert-VITS2（模型 + 独立 venv，不进仓库）
+  G_*.pth                     塔菲 V200 权重
+  config.json                 version=2.0, spk2id={永雏塔菲:0}, 44100Hz
+services/taffy_tts.py         常驻服务，仅监听 127.0.0.1:17861
+qqbot_core/voice.py           taffy_speak 工具 + 至多一次投递
+```
+
+### 启动
+
+```powershell
+python scripts/start_taffy_tts.py     # 约 10-15 秒加载模型
+```
+
+### 工作方式
+
+```
+@塔菲 → DeepSeek 拿到 taffy_speak 工具 → 自己决定文字还是语音
+       → 语音：TTS 合成 → record 段发送
+       → 失败：自动降级发文字（不会没反应、不会重复发）
+```
+
+语音的文本内容**照常进入会话历史**，所以下一轮它知道自己说过什么。
+
+### 说明
+
+合成音色为社区模型的**同人二创**，非官方；机器人明确不是本人也不是官方账号。
+语音依赖本地 GPU（实测 RTX 5070 8GB 可用，torch cu128）。
+
+---
+
 ## 测试
 
 ```powershell
@@ -191,7 +235,8 @@ python -m pytest tests -q
 3. **偶发空回复** —— 模型返回空且备选模型预算耗尽（实测约 2/24 次）。
 4. **夜间静默硬编码** —— `8:00–23:00` 之外不主动接话（只影响主动接话，@ 与私聊照常回复），目前不是配置项。
 5. **NapCat 可能自行掉线** —— 桥接启动自检含 OneBot HTTP 探测，探测失败会拒绝启动。
-6. **群风格学习已停用** —— 学习链路已移除，`group_profiles.json` 中的统计为历史快照。
+6. **语音音频不自动清理** —— 保留到 512 MB 上限后降级文字（按项目规则，删除需人工确认）。
+7. **群风格学习已停用** —— 学习链路已移除，`group_profiles.json` 中的统计为历史快照。
 
 ---
 

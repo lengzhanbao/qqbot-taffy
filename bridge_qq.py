@@ -56,7 +56,9 @@ from qqbot_core.routing import (
     select_context_messages as _select_context_messages,
     should_proactively_join_group as _should_proactively_join_group,
 )
+from qqbot_core import music as music_mod
 from qqbot_core import persona as persona_mod
+from qqbot_core import voice as voice_mod
 from qqbot_core.style import (
     CURRENT_DATE_PROMPT,
     ENTITY_NAME_GUARD,
@@ -265,6 +267,9 @@ def _dedupe_card_parts(parts):
             result.append(item)
     return result or cleaned
 
+
+# 点歌命令：/点歌 歌名（也接受全角斜杠）。与 DeepSeek 对话完全解耦。
+_MUSIC_CMD_RE = re.compile(r"^[/／]点歌\s*(.*)$", re.S)
 
 _CARD_NOISE_RE = re.compile(
     r"(appicon|app_icon|/icon|avatar|logo|ugcimg|miniapp\.gtimg|qlogo|"
@@ -4443,6 +4448,18 @@ def _normalize_tool_calls(tool_calls):
     for tc in tool_calls or []:
         fn = tc.get("function") or {}
         name = str(fn.get("name") or "").strip()
+        if name == voice_mod.TOOL_NAME:
+            # Preserve malformed terminal arguments so the final stage can fall back
+            # without retrying DeepSeek or leaking tool JSON to QQ.
+            raw = fn.get("arguments", "")
+            normalized.append({
+                "id": str(tc.get("id") or f"call_{len(normalized)}"),
+                "type": "function",
+                "function": {"name": name, "arguments": (
+                    json.dumps(raw, ensure_ascii=False) if isinstance(raw, dict) else str(raw)
+                )},
+            })
+            continue
         if name not in {"plan_search", "search_web", "fetch_page"}:
             continue
         raw_args = fn.get("arguments")
@@ -6345,7 +6362,7 @@ class Bridge:
                         temperature=0.0, top_p=0.5, model_refs=None,
                         weak_query="", min_reply_len=0, deadline=None,
                         continuation_tokens=0, preserve_code=False,
-                        session_key="", accept_partial=False):
+                        session_key="", accept_partial=False, allow_voice=False):
         """遍历模型列表完成一次调用，返回 (回复, 使用的模型)。
 
         accept_partial=True 用于内部摘要这类调用：允许截断输出，
@@ -6382,6 +6399,8 @@ class Bridge:
                 provider, model_name, system, messages, max_tokens,
                 temperature, top_p, session_key,
             )
+            if allow_voice:
+                voice_mod.enable_speech(body)
             # 已知较弱的模型（历史上被丢弃/失败过）不再重试，直接换下一个，
             # 避免"空回复重试"白烧一轮预算（实测每次约 8 秒）。
             _model_is_weak = _model_health.get(model_ref, 0) < 0
@@ -6405,7 +6424,7 @@ class Bridge:
                                 raise asyncio.TimeoutError(
                                     "DeepSeek request budget exhausted"
                                 )
-                            reply, state, _, finish_reason, _ = await self._run_api_call(
+                            reply, state, final_calls, finish_reason, _ = await self._run_api_call(
                                 body, api_url, api_key, call_deadline)
                         finally:
                             self.model_semaphore.release()
@@ -6413,7 +6432,7 @@ class Bridge:
                         async with self.model_semaphore:
                             if _remaining_budget(deadline) == 0:
                                 return "", ""
-                            reply, state, _, finish_reason, _ = await self._run_api_call(
+                            reply, state, final_calls, finish_reason, _ = await self._run_api_call(
                                 body, api_url, api_key, deadline)
                 except Exception as e:
                     inc_stat("model_fail")
@@ -6423,6 +6442,12 @@ class Bridge:
                         "network" if not isinstance(e, asyncio.TimeoutError) else "timeout",
                     )
                     break
+                if allow_voice and state == "ok":
+                    terminal = voice_mod.final_speech_reply(final_calls, reply, finish_reason)
+                    if terminal is not None:
+                        _mark_provider_ok(model_ref)
+                        inc_stat("model_success")
+                        return terminal, model_ref
                 raw_reply = reply
                 discarded = False
                 if reply:
@@ -6522,12 +6547,12 @@ class Bridge:
                              temperature=0.0, top_p=0.5, model_refs=None,
                              weak_query="", min_reply_len=0, deadline=None,
                              continuation_tokens=0, preserve_code=False,
-                             session_key=""):
+                             session_key="", allow_voice=False):
         """模型竞速：前两个可用模型同时请求，谁先返回有效结果用谁。"""
         if self.model_semaphore is None:
             self.model_semaphore = asyncio.Semaphore(3)
         requested_models = list(model_refs or MODELS)
-        if DEEPSEEK_MODEL_REF in requested_models:
+        if DEEPSEEK_MODEL_REF in requested_models or allow_voice:
             return await self._complete(
                 system, messages, max_tokens=max_tokens,
                 temperature=temperature, top_p=top_p,
@@ -6536,6 +6561,7 @@ class Bridge:
                 deadline=deadline, continuation_tokens=continuation_tokens,
                 preserve_code=preserve_code,
                 session_key=session_key,
+                allow_voice=allow_voice,
             )
         ordered = _sort_models(requested_models)
         candidates = list(ordered[:2])
@@ -7950,6 +7976,7 @@ class Bridge:
                     continuation_tokens=output_profile["continuation_tokens"],
                     preserve_code=output_profile["category"] == "code",
                     session_key=key,
+                    allow_voice=True,
                 )
             else:
                 reply, used_model = await self._complete_race(
@@ -7961,6 +7988,7 @@ class Bridge:
                     continuation_tokens=output_profile["continuation_tokens"],
                     preserve_code=output_profile["category"] == "code",
                     session_key=key,
+                    allow_voice=True,
                 )
         _log_phase(phase_start, "最终模型")
         if not reply:
@@ -7993,7 +8021,8 @@ class Bridge:
         else:
             log(f"[API] 使用模型: {used_model} | temp={temperature} top_p={top_p}")
 
-        if _looks_like_tool_call(reply) and tool_round < REACT_MAX_ROUNDS:
+        if (not isinstance(reply, voice_mod.VoiceReply)
+                and _looks_like_tool_call(reply) and tool_round < REACT_MAX_ROUNDS):
             tool_round += 1
             log("[FC] 第2轮仍输出工具调用文本，进入第3轮强制成文")
             final_messages = [
@@ -8035,7 +8064,7 @@ class Bridge:
                     preserve_code=output_profile["category"] == "code",
                 )
             log("[FC] 第3轮最终回答已生成")
-        elif _looks_like_tool_call(reply):
+        elif not isinstance(reply, voice_mod.VoiceReply) and _looks_like_tool_call(reply):
             log("[Agent] 强制终止工具调用循环，防止死循环")
             reply = (
                 "塔菲暂时没搜到可靠答案，先不乱编喵。"
@@ -8043,7 +8072,8 @@ class Bridge:
             )
         before_sanitize = reply
         preserve_code = output_profile["category"] == "code"
-        reply = _sanitize_reply(reply, preserve_code=preserve_code)
+        if not isinstance(reply, voice_mod.VoiceReply):
+            reply = _sanitize_reply(reply, preserve_code=preserve_code)
         _log_reply_size("sanitize", reply, used_model, before=before_sanitize)
         # 2026-10-17：移除"二次改写"。正常的 DeepSeek 回答直接发送。
         # 原先检测到乱码/重复会再调一次模型重写，但那属于主观判断：
@@ -8055,13 +8085,14 @@ class Bridge:
         # "竹知了少字"加的；那个问题的真正根因是流式解码丢内容块，已在
         # _api_call 修掉（实测 3/3 逐字正确）。留着它们只会让
         # "DeepSeek 原始回答 ≠ 最终发送内容"，且可能改动事实与专名。
-        if route.evidence != "LOCAL":
+        if route.evidence != "LOCAL" and not isinstance(reply, voice_mod.VoiceReply):
             reply = _append_search_source_marker(
                 reply, search_returned, search_attempted,
                 taffy_enabled=TAFFY_FLAVOR)
         before_limit = reply
-        reply = _truncate_reply(
-            reply, output_profile["max_chars"], preserve_code=preserve_code)
+        if not isinstance(reply, voice_mod.VoiceReply):
+            reply = _truncate_reply(
+                reply, output_profile["max_chars"], preserve_code=preserve_code)
         _log_reply_size(
             "length_control", reply, used_model, output_profile["max_chars"],
             before=before_limit,
@@ -8070,7 +8101,8 @@ class Bridge:
             return "群内参考资料的授权或状态已变化，请再问一次喵。"
         self.recent_replies.append(reply)
         self.recent_replies = self.recent_replies[-10:]
-        if intent == "fact" and "AI 暂时" not in reply and not search_unverified:
+        if (intent == "fact" and "AI 暂时" not in reply and not search_unverified
+                and not isinstance(reply, voice_mod.VoiceReply)):
             cache_intent = (
                 "time_sensitive" if route.evidence == "REQUIRED" else intent
             )
@@ -8087,7 +8119,9 @@ class Bridge:
                 **({"speaker_id": str(speaker_id)} if speaker_id is not None else {}),
             },
             {
-                "role": "assistant", "content": reply,
+                "role": "assistant", "content": str(reply),
+                **({"reply_medium": "voice", "reply_id": reply.reply_id,
+                    "delivery_state": "pending"} if isinstance(reply, voice_mod.VoiceReply) else {}),
                 **({"recorded_at": time.time()} if AGENT_MEMORY_ENABLED else {}),
                 **({"knowledge_revision": memory_revision} if references_enabled else {}),
                 **({"speaker_id": str(speaker_id)} if speaker_id is not None else {}),
@@ -8100,7 +8134,7 @@ class Bridge:
             "summary": store.get("summary", "") or "",
             "summary_index": summary_index,
             "last_question": query,
-            "last_answer": reply,
+            "last_answer": str(reply),
             "last_speaker": speaker or "",
             "last_speaker_id": str(speaker_id or ""),
             **({"last_reply_at": time.time()} if AGENT_MEMORY_ENABLED else {}),
@@ -8662,6 +8696,17 @@ class Bridge:
             return
         if _admin_text(text).startswith("!"):
             return
+        # 点歌命令：不需要 @，且不进入 DeepSeek 对话流程
+        try:
+            if await self._handle_music_command(text, gid, uid):
+                return
+        except Exception as exc:  # noqa: BLE001
+            log(f"[点歌] group={gid} 命令处理异常 {type(exc).__name__}: {str(exc)[:80]}")
+            try:
+                await self.send_group_text(gid, "点歌出错了喵，待会再试。")
+            except Exception:
+                pass
+            return
         if TRIGGER == "at" and not at_bot:
             if not _check_safety(text)[0]:
                 return
@@ -8723,7 +8768,7 @@ class Bridge:
         record_reply_time(int((time.time() - reply_start) * 1000))
         log(f"[群{gid}] AI回复: {reply[:80]}")
         send_start = time.time()
-        send_result = await self.send_group_msg(gid, uid, reply)
+        send_result = await self._send_model_reply(gid, uid, reply)
         if isinstance(send_result, dict) and (
             send_result.get("status") == "ok" or send_result.get("retcode") == 0
         ):
@@ -8805,7 +8850,7 @@ class Bridge:
         record_reply_time(int((time.time() - reply_start) * 1000))
         log(f"[私聊{uid}] AI回复: {reply[:80]}")
         send_start = time.time()
-        await self.send_private_msg(uid, reply)
+        await self._send_model_reply("private_" + uid, uid, reply)
         _log_phase(send_start, "发送")
         try:
             _try_self_improve(uid, uname, text, reply, is_private=True)
@@ -8813,6 +8858,42 @@ class Bridge:
             pass
 
     # ---------- 发送 ----------
+    async def _send_model_reply(self, key, uid, reply):
+        is_private = str(key).startswith("private_")
+
+        async def send_text(text):
+            if is_private:
+                return await self.send_private_msg(uid, text)
+            return await self.send_group_msg(key, uid, text)
+
+        if not isinstance(reply, voice_mod.VoiceReply):
+            return await send_text(reply)
+        if getattr(self, "voice_delivery", None) is None:
+            self.voice_delivery = voice_mod.VoiceDelivery(RUNTIME_DIR)
+
+        async def send_record(segment):
+            action = "send_private_msg" if is_private else "send_group_msg"
+            params = {"user_id" if is_private else "group_id": int(uid if is_private else key),
+                      "message": [segment]}
+            return await self.call_api(action, params, delivery_once=True)
+
+        result = await self.voice_delivery.deliver(reply, str(key), send_record, send_text, log)
+        if result.get("_reply_medium") == "voice" and result.get("_delivery_state") == "sent":
+            if not is_private:
+                self._observe_sent_group_message(key, str(reply), result)
+            write_health(last_reply_sent_at=datetime.now().isoformat(),
+                         last_reply_kind="private" if is_private else "group")
+        # Store actual delivery metadata beside ordinary assistant text, never tool JSON.
+        def mark_delivery(store):
+            for item in reversed(store.get("messages") or []):
+                if item.get("reply_id") == reply.reply_id:
+                    item["reply_medium"] = result.get("_reply_medium", "voice")
+                    item["delivery_state"] = result.get("_delivery_state", "unknown")
+                    break
+            return store
+        self.sessions.update(key, mark_delivery)
+        return result
+
     def _observe_sent_group_message(self, gid, text, result, at_qq=""):
         if not AGENT_MEMORY_ENABLED or text == THINKING_PLACEHOLDER:
             return
@@ -8850,6 +8931,69 @@ class Bridge:
             )
         return result
 
+    async def _handle_music_command(self, text, gid, uid):
+        """处理 /点歌。返回 True 表示"这条消息已被命令消费"，调用方不再走聊天流程。
+
+        三个状态分别记日志，只有"群里真的发出"才算打通：
+          1. 搜索成功（拿到 songmid）
+          2. 卡片被 NapCat 接受（status=ok）
+          3. 群里有 message_id（用户能看到卡片）
+        """
+        cleaned = _admin_text(text or "").strip()
+        match = _MUSIC_CMD_RE.match(cleaned)
+        if not match:
+            return False
+        if not self._group_allowed(gid, "observe"):
+            return False
+        keyword = match.group(1).strip()
+        if not keyword:
+            await self.send_group_text(gid, "点歌要带歌名喵，比如：/点歌 晴天")
+            return True
+
+        # ① 搜索
+        try:
+            results = music_mod.search_qq_music(keyword, limit=5)
+        except music_mod.MusicError as exc:
+            log(f"[点歌] group={gid} 搜索失败 error={exc}")
+            await self.send_group_text(gid, f"搜「{keyword}」失败了喵，待会儿再试试？")
+            return True
+        if not results:
+            log(f"[点歌] group={gid} 搜索无结果 keyword={keyword}")
+            await self.send_group_text(gid, f"没找到「{keyword}」这首喵，换个说法试试？")
+            return True
+
+        top = results[0]
+        log(f"[点歌] group={gid} ①搜索成功 song={top['songname']} "
+            f"singer={top['singer']} songmid={top['songmid']} 候选={len(results)}")
+
+        # 先把选中的是哪首说清楚（这句失败也不影响后面发卡片）
+        try:
+            _desc = music_mod.describe(top)
+            await self.send_group_text(gid, f"给{_desc}喵")
+        except Exception as exc:  # noqa: BLE001
+            log(f"[点歌] group={gid} 文字提示失败 {type(exc).__name__}")
+
+        # ② 发卡片
+        try:
+            result = await self.call_api("send_group_msg", {
+                "group_id": int(gid),
+                # 用 custom 卡片：NapCat 4.18 不接受 music/type=qq（签名服务失效）
+                "message": [music_mod.build_custom_card(top)],
+            })
+        except Exception as exc:  # noqa: BLE001
+            log(f"[点歌] group={gid} ②卡片发送异常 {type(exc).__name__}: {str(exc)[:80]}")
+            await self.send_group_text(gid, "卡片没发出去喵，可能是音乐签名服务的问题。")
+            return True
+
+        data = (result or {}).get("data") or {}
+        ok = bool(isinstance(result, dict) and
+                  (result.get("status") == "ok" or result.get("retcode", 0) == 0))
+        message_id = str(data.get("message_id") or "")
+        log(f"[点歌] group={gid} ②卡片结果 ok={ok} ③message_id={message_id or '无'}")
+        if not ok:
+            await self.send_group_text(gid, "卡片被拒绝了喵，可能是音乐签名服务失效。")
+        return True
+
     async def send_private_msg(self, uid, text):
         _log_reply_size("send_private", text)
         result = await self.call_api("send_private_msg", {"user_id": int(uid), "message": text})
@@ -8860,12 +9004,14 @@ class Bridge:
             )
         return result
 
-    async def call_api(self, action, params, retries=5):
+    async def call_api(self, action, params, retries=5, *, delivery_once=False):
         """通过 OneBot 11 HTTP API 调用（默认 http://127.0.0.1:6099）。
         注意：OneBot 11 启动的是 WebSocket Server（推消息），不是 Client，
         所以调 API 必须走 HTTP，不能用 WS 反向。"""
         url = f"{ONEBOT_HTTP_URL}/{action}"
         body = json.dumps(params).encode("utf-8")
+        if delivery_once:
+            retries = 1
         loop = asyncio.get_running_loop()
         def _do():
             req = urllib.request.Request(url, data=body, method="POST", headers={
@@ -8875,6 +9021,14 @@ class Bridge:
                 with urllib.request.urlopen(req, timeout=10) as r:
                     return json.loads(r.read().decode("utf-8", "replace"))
             except Exception as e:
+                if delivery_once:
+                    # Once a send may have reached QQ, timeout/disconnect/invalid JSON
+                    # must stay unknown. Only connection refusal proves no dispatch.
+                    reason = getattr(e, "reason", e)
+                    refused = isinstance(reason, ConnectionRefusedError)
+                    return {"status": "failed" if refused else "unknown",
+                            "_delivery_state": "failed" if refused else "unknown",
+                            "msg": type(e).__name__}
                 return {"status": "failed", "msg": repr(e)[:120]}
         d = None
         last_failure = None
