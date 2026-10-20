@@ -177,7 +177,7 @@ python restart_bridge_hidden.py
 ### 组成
 
 ```
-E:\Bert-VITS2-master\        本地 Bert-VITS2（模型 + 独立 venv，不进仓库）
+../Bert-VITS2-master/        本地 Bert-VITS2（与仓库同级，模型 + 独立 venv，不进仓库）
   G_*.pth                     塔菲 V200 权重
   config.json                 version=2.0, spk2id={永雏塔菲:0}, 44100Hz
 services/taffy_tts.py         常驻服务，仅监听 127.0.0.1:17861
