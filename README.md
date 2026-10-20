@@ -1,5 +1,13 @@
 # QQBot · 永雏塔菲
 
+> A Taffy-themed QQ group AI bot — **DeepSeek** persona chat with short/long-term memory,
+> image understanding, **Bert-VITS2** voice replies and QQ Music cards,
+> running on **NapCat / OneBot v11**.
+>
+> **Keywords**: `qq-bot` `qqbot` `onebot` `onebot11` `napcat` `deepseek` `llm` `chatbot`
+> `ai-companion` `persona` `vtuber` `taffy` `tts` `bert-vits2` `vits` `voice-synthesis`
+> `agent-memory` `long-term-memory` `image-understanding` `python` `windows` `chinese`
+
 基于 **NapCat + OneBot v11 + Python** 的 QQ 群机器人，角色固定为**永雏塔菲**（中文虚拟主播）的同人 AI 群友。
 
 **它不是本人，也不是官方账号。**
