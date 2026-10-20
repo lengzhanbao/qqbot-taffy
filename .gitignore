@@ -44,3 +44,4 @@ __pycache__/
 .tmp/
 demo/build_*/
 refactor/
+*.sqlite3

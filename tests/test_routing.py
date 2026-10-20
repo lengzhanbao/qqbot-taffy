@@ -289,8 +289,8 @@ def test_group_short_social_reply_is_brief_no_search_and_uses_no_old_context(mon
 
     monkeypatch.setattr(bridge_qq, "search_web_async", no_search)
     reply = asyncio.run(bridge.ask_model(
-        "group-1", "周杰伦(1111): 扣1送地狱火", "扣1送地狱火",
-        "周杰伦", speaker_id="1111"))
+        "group-1", "群友甲(1111): 扣1送地狱火", "扣1送地狱火",
+        "群友甲", speaker_id="1111"))
 
     assert "【群聊接话】" not in bridge.captured_system  # 默认路径不再叠加场景风格层
     assert "旧比赛背景" not in str(bridge.captured_messages)
