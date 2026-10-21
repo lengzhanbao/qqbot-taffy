@@ -19,16 +19,31 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt -r requirements-dev.txt
-      - name: Python version and deps
+      - name: Python and deps info
         run: |
           python --version
-          pip list --format=freeze
-      - name: Run tests
-        run: |
-          python -m pytest tests/ -q --tb=short -p no:cacheprovider 2>&1
+          pip list --format=freeze > deps.txt
+          Get-Content deps.txt | Select-Object -First 40
+      - name: Run tests (detail)
         id: tests
-      - name: Show pytest summary (on failure)
-        if: failure()
+        shell: pwsh
         run: |
-          echo "=== pytest failed, rerunning with -x --lf for details ==="
-          python -m pytest tests/ -q --tb=long -p no:cacheprovider -x 2>&1 | Select-String -Pattern "FAILED|ERROR|assert" | Select-Object -First 30
+          $out = python -m pytest tests/ -q --tb=short -p no:cacheprovider 2>&1
+          $out | Out-File -FilePath pytest_output.txt -Encoding utf8
+          $out | Select-Object -Last 40
+          $exit = $LASTEXITCODE
+          Write-Host "pytest exit code: $exit"
+          if ($exit -ne 0) {
+            Write-Host "=== FAILED tests ==="
+            Select-String -Path pytest_output.txt -Pattern "^FAILED|^ERROR" | ForEach-Object { Write-Host $_.Line }
+            Write-Host "=== First error detail ==="
+            Select-String -Path pytest_output.txt -Pattern "assert|Error|Exception" | Select-Object -First 15 | ForEach-Object { Write-Host $_.Line }
+          }
+          exit $exit
+      - name: Upload pytest output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: pytest_output.txt
+          retention-days: 7
