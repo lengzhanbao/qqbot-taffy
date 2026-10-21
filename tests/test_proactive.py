@@ -73,6 +73,11 @@ def test_proactive_reply_uses_deepseek_once_and_sends_without_at(monkeypatch):
         "status": "ok", "retcode": 0, "data": {"message_id": "voice-1"}
     })
     bridge.voice_delivery = _VoiceDelivery()
+    # 固定随机数：random.random() < 0.3 时走文字，> 0.3 走语音。
+    # 这里固定为 0.5（语音路径），避免测试因随机性不稳定。
+    import random as _random
+    _orig = _random.random
+    _random.random = lambda: 0.5
     event = {"message": [{"type": "text", "data": {"text": "你是牛马吗"}}]}
 
     first = asyncio.run(bridge._maybe_proactive_group_reply(
@@ -92,6 +97,7 @@ def test_proactive_reply_uses_deepseek_once_and_sends_without_at(monkeypatch):
     assert isinstance(delivered[0][0], bridge_qq.voice_mod.VoiceReply)
     bridge.call_api.assert_awaited_once()
     assert "最近内容" in calls[0][1][0]["content"]
+    _random.random = _orig  # 恢复原函数
 
 
 def test_proactive_reply_uses_conservative_limits_and_bounded_context():
