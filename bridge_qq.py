@@ -8632,8 +8632,13 @@ class Bridge:
             except Exception as exc:
                 log(f"[主动接话] group={gid} status=text_delivery_failed error={type(exc).__name__}")
                 return False
-            if not (isinstance(result, dict) and (
-                    result.get("status") == "ok" or result.get("retcode") == 0)):
+            # status 明确写 failed 时，即使 retcode=0 也算失败——
+            # 矛盾的确认（status=failed + retcode=0）不能当成发送成功。
+            _text_ok = isinstance(result, dict) and (
+                result.get("status") == "ok"
+                or (result.get("retcode") == 0
+                    and result.get("status") != "failed"))
+            if not _text_ok:
                 log(f"[主动接话] group={gid} status=text_send_failed")
                 return False
             self._record_proactive_delivery(gid, reply)

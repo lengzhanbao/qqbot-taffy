@@ -151,6 +151,15 @@ def test_unsent_attempt_never_counts_as_success(monkeypatch, outcome):
             outcome, "小菲可没答应加班！"), "test/model"
 
     bot._complete = complete
+    # 主动接话里 random.random() < 0.3 决定走文字路径；固定 0.1 稳定走文字，
+    # 否则 send_error/send_exception 会因随机性 flaky。
+    import random as _random
+    _orig_random = _random.random
+    _random.random = lambda: 0.1
+    try:
+        pass
+    finally:
+        pass
     if outcome == "send_error":
         # A contradictory acknowledgement must not be accepted as success.
         bot.send_group_text = AsyncMock(return_value={"status": "failed", "retcode": 0})
@@ -169,6 +178,7 @@ def test_unsent_attempt_never_counts_as_success(monkeypatch, outcome):
     if outcome == "quiet":
         assert any("status=quiet" in line for line in logs)
         assert not any("failed" in line for line in logs)
+    _random.random = _orig_random
 
 
 def test_attempt_backoff_expires_without_consuming_send_cooldown(monkeypatch):

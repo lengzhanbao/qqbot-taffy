@@ -3,6 +3,25 @@ import sys
 import os
 from pathlib import Path
 
+# CI (windows-latest) 的 locale 是 CP936(GBK)，测试里 print 中文会 UnicodeEncodeError。
+# 必须在 pytest 收集/输出任何中文之前，把三个标准流强制重配为 UTF-8。
+# PYTHONIOENCODING 只影响**新打开**的流，pytest 已经拿到的 sys.stdout 不会变。
+def _force_utf8_stdio():
+    import io as _io
+    for name in ("stdout", "stderr", "stdin"):
+        old = getattr(sys, name, None)
+        if old is None:
+            continue
+        enc = getattr(old, "encoding", None) or ""
+        if "utf" in enc.lower():
+            continue
+        setattr(sys, name, _io.TextIOWrapper(
+            getattr(old, "buffer", old), encoding="utf-8", errors="replace",
+            newline="", write_through=True))
+
+
+_force_utf8_stdio()
+
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 os.environ.setdefault("QQ_TEST_MODE", "1")
