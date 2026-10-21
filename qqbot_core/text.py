@@ -103,6 +103,9 @@ def _sanitize_reply(reply, *, preserve_code=False):
         return text.strip() if strip else text
 
     reply = str(reply or "")
+    # 群聊可以选择不发言：保留这个控制标记，避免被 Markdown 清理成普通文字。
+    if reply.strip().upper() == "__QUIET__":
+        return "__QUIET__"
     if preserve_code:
         parts = re.split(r"(```[\s\S]*?(?:```|$)|`[^`\n]+`)", reply)
         reply = "".join(
