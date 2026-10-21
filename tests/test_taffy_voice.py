@@ -66,6 +66,45 @@ def test_same_final_generation_decides_medium(model, speech):
     assert model._run_api_call.await_count == 1
 
 
+def test_tool_planner_filter_does_not_remove_final_speech_tool(model):
+    async def api(body, *args):
+        assert body["model"] == "deepseek-flash"
+        assert any(tool["function"]["name"] == "taffy_speak" for tool in body["tools"])
+        return "", "ok", [call()], "tool_calls", []
+
+    model._run_api_call = AsyncMock(side_effect=api)
+    reply, _ = asyncio.run(model._complete(
+        "人格", [], model_refs=["deepseek/deepseek-flash"],
+        max_tokens=2400, allow_voice=True))
+    assert reply == "晚上好呀，我是塔菲喵！"
+
+
+def test_empty_search_planner_uses_search_then_keeps_voice_final(monkeypatch):
+    spoken = voice.VoiceReply("今天北京多云，塔菲给你播报喵。")
+    bridge = _bridge_with_final(monkeypatch, reply=spoken)
+    monkeypatch.setattr(app, "ALWAYS_SEARCH", False)
+    monkeypatch.setattr(app, "MODELS_TOOL_PLANNING", [])
+    monkeypatch.setattr(app, "_should_use_light_search", lambda *_: False)
+    monkeypatch.setattr(app, "_should_use_single_shot_search", lambda *_: False)
+    planned = AsyncMock(return_value=([], "", "", []))
+    bridge._complete_with_tools = planned
+    searches = []
+
+    async def search(query, **kwargs):
+        searches.append(query)
+        return "【北京天气】今天北京多云，气温适宜。"
+
+    monkeypatch.setattr(app, "search_web_async", search)
+    reply = asyncio.run(bridge.ask_model(
+        "private_u", "现在北京天气怎么样", "现在北京天气怎么样", "测试用户"))
+
+    assert searches == [app._generic_fallback_query("现在北京天气怎么样")]
+    assert planned.await_count == 1
+    assert planned.await_args.kwargs["model_refs"] == []
+    assert bridge.captured_kwargs["allow_voice"] is True
+    assert isinstance(reply, voice.VoiceReply)
+
+
 def test_internal_generation_has_no_speech_tool(model):
     model._run_api_call = AsyncMock(return_value=("内部摘要。", "ok", [], "stop", []))
     asyncio.run(model._complete("摘要", [], model_refs=["deepseek/deepseek-flash"]))

@@ -51,6 +51,7 @@ def test_proactive_reply_uses_deepseek_once_and_sends_without_at(monkeypatch):
     bridge._proactive_daily_count = 0
     calls = []
     sent = []
+    delivered = []
 
     async def complete(system, messages, **kwargs):
         calls.append((system, messages, kwargs))
@@ -60,8 +61,18 @@ def test_proactive_reply_uses_deepseek_once_and_sends_without_at(monkeypatch):
         sent.append((gid, text))
         return {"status": "ok", "retcode": 0}
 
+    class _VoiceDelivery:
+        async def deliver(self, reply, target, send_record, send_text, log):
+            delivered.append((reply, target))
+            result = await send_record({"type": "record", "data": {"file": "base64:AA=="}})
+            return {**result, "_reply_medium": "voice", "_delivery_state": "sent"}
+
     bridge._complete = complete
     bridge.send_group_text = send_group_text
+    bridge.call_api = AsyncMock(return_value={
+        "status": "ok", "retcode": 0, "data": {"message_id": "voice-1"}
+    })
+    bridge.voice_delivery = _VoiceDelivery()
     event = {"message": [{"type": "text", "data": {"text": "你是牛马吗"}}]}
 
     first = asyncio.run(bridge._maybe_proactive_group_reply(
@@ -76,7 +87,10 @@ def test_proactive_reply_uses_deepseek_once_and_sends_without_at(monkeypatch):
     assert len(calls) == 1
     assert calls[0][2]["model_refs"] == [bridge_qq.DEEPSEEK_MODEL_REF]
     assert calls[0][2]["max_tokens"] == bridge_qq.PROACTIVE_MAX_TOKENS
-    assert sent == [("42", "111，大哥真送吗？")]
+    assert sent == []
+    assert len(delivered) == 1
+    assert isinstance(delivered[0][0], bridge_qq.voice_mod.VoiceReply)
+    bridge.call_api.assert_awaited_once()
     assert "最近内容" in calls[0][1][0]["content"]
 
 
@@ -129,7 +143,44 @@ def _ready(monkeypatch):
     bridge._proactive_day, bridge._proactive_daily_count = "", 0
     bridge._complete = AsyncMock(return_value=("小菲可没答应加班！", bridge_qq.DEEPSEEK_MODEL_REF))
     bridge.send_group_text = AsyncMock(return_value={"status": "ok", "retcode": 0})
+
+    class _TextDelivery:
+        async def deliver(self, reply, target, send_record, send_text, log):
+            try:
+                result = await send_text(str(reply))
+            except Exception:
+                return {"_reply_medium": "text", "_delivery_state": "unknown"}
+            state = ("sent" if isinstance(result, dict)
+                     and result.get("status") == "ok" and result.get("retcode", 0) == 0
+                     else "failed")
+            return {**(result or {}), "_reply_medium": "text", "_delivery_state": state}
+
+    bridge.voice_delivery = _TextDelivery()
     return bridge
+
+
+def test_proactive_voice_text_fallback_records_monotonic_cooldowns(monkeypatch):
+    bridge = _ready(monkeypatch)
+    monkeypatch.setattr(bridge_qq, "PROACTIVE_GROUP_COOLDOWN_SECONDS", 30)
+    voice_reply = bridge_qq.voice_mod.VoiceReply("塔菲也要来凑个热闹！")
+    bridge._complete = AsyncMock(return_value=(voice_reply, bridge_qq.DEEPSEEK_MODEL_REF))
+
+    class _VoiceFallback:
+        async def deliver(self, reply, group_id, send_record, send_text, log):
+            await send_text(str(reply))
+            return {"_reply_medium": "text", "_delivery_state": "sent"}
+
+    bridge.voice_delivery = _VoiceFallback()
+    assert asyncio.run(bridge._maybe_proactive_group_reply({}, "42", "你们在聊什么"))
+
+    sent_at = bridge._proactive_last_by_group["42"]
+    assert bridge._proactive_last_global == sent_at
+    assert 0 <= __import__("time").monotonic() - sent_at < 2
+    assert bridge._proactive_daily_count == 1
+    assert bridge._proactive_group_counts == {"42": 1}
+    assert bridge._proactive_hourly_counts == {"42|2026-10-15 12": 1}
+    assert asyncio.run(bridge._maybe_proactive_group_reply({}, "42", "再接一句")) is False
+    assert bridge._complete.await_count == 1
 
 
 # 2026-10-17：不再有"没被邀请就不调模型"这条规则判断——

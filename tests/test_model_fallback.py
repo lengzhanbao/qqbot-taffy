@@ -66,6 +66,26 @@ class TestComplete:
         assert calls == [FIRST_NAME]
         assert bridge_qq._model_health[FIRST] == 1
 
+    def test_model_queue_timeout_respects_turn_deadline_without_cooling_model(self, monkeypatch):
+        bridge = _make_bridge()
+        bridge.model_semaphore = asyncio.Semaphore(0)
+        calls = []
+        monkeypatch.setattr(bridge_qq, "PROVIDERS", {
+            "glm": {"url": "https://example.invalid/model", "key": "test"},
+        })
+
+        async def fake(body, *args):
+            calls.append(body)
+            return _ok()
+
+        bridge._run_api_call = fake
+        reply, model = _run(bridge._complete(
+            "sys", [], model_refs=[FIRST], deadline=time.monotonic() + 0.03))
+        assert (reply, model) == ("", "")
+        assert calls == []
+        assert FIRST not in bridge_qq._provider_cooldown
+        assert bridge_qq._model_health.get(FIRST, 0) == 0
+
     def test_falls_back_when_empty_ok(self, monkeypatch):
         bridge = _make_bridge()
 
@@ -323,6 +343,44 @@ class TestCompleteRace:
 
 
 class TestCompleteWithTools:
+    def test_empty_tool_planner_pool_does_not_fall_back_to_final_pool(self, monkeypatch):
+        bridge = _make_bridge()
+        calls = []
+        monkeypatch.setattr(bridge_qq, "MODELS_TOOL_PLANNING", [])
+        monkeypatch.setattr(bridge_qq, "MODELS_FACTUAL", [FIRST])
+
+        async def fake(body, *args):
+            calls.append(body)
+            return _ok()
+
+        bridge._run_api_call = fake
+        result = _run(bridge._complete_with_tools("sys", []))
+        assert result == ([], "", "", [])
+        assert calls == []
+
+    def test_filters_deepseek_direct_and_proxy_refs_from_planning(self, monkeypatch):
+        bridge = _make_bridge()
+        calls = []
+        monkeypatch.setattr(bridge_qq, "PROVIDERS", {
+            "deepseek": {"url": "https://example.invalid/direct", "key": "test"},
+            "opencode": {"url": "https://example.invalid/proxy", "key": "test"},
+        })
+
+        async def fake(body, *args):
+            calls.append(body["model"])
+            return ("", "ok", _tool_call(), "tool_calls", [])
+
+        bridge._run_api_call = fake
+        refs = [
+            "deepseek/deepseek-flash",
+            "opencode/deepseek-v4.1-flash",
+            "opencode/search-planner",
+        ]
+        result = _run(bridge._complete_with_tools("sys", [], model_refs=refs))
+        assert calls == ["search-planner"]
+        assert result[0] == _tool_call()
+        assert result[2] == "opencode/search-planner"
+
     def test_returns_tool_calls(self, monkeypatch):
         bridge = _make_bridge()
 

@@ -125,6 +125,12 @@ ONEBOT_HTTP_URL = os.environ.get(
     "QQ_ONEBOT_HTTP_URL", "http://127.0.0.1:6099"
 ).rstrip("/")
 TRIGGER = os.environ.get("QQ_TRIGGER", "at")
+try:
+    MESSAGE_QUEUE_MAXSIZE = max(
+        1, min(64, int(os.environ.get("QQ_MESSAGE_QUEUE_MAXSIZE", "8")))
+    )
+except ValueError:
+    MESSAGE_QUEUE_MAXSIZE = 8
 # 单条 QQ 消息的协议上限（约 4500 字）。这是**发送通道的物理上限**，
 # 不是风格/字数偏好：生成侧不再按类别压 token 或按风格截断，只在超出发送
 # 能力时按句子边界截断（`_truncate_at_sentence`）。可用 QQ_MAX_REPLY_LEN 覆盖。
@@ -418,6 +424,8 @@ for _fallback_ref in _model_list_env("QQ_FINAL_FALLBACK_MODEL"):
 MODELS = list(MODELS_FINAL)
 MODELS_FACTUAL = list(MODELS_FINAL)
 MODELS_CASUAL = list(MODELS_FINAL)
+# Search/tool planning is opt-in and never inherits the final-reply model pool.
+MODELS_TOOL_PLANNING = _model_list_env("QQ_TOOL_PLANNER_MODELS")
 
 # 调用大模型时使用的客户端标识。OpenCode Go 明确要求用自有 user agent，
 # 而不是通用 SDK/HTTP 库名（如 OpenAI/Python 1.40.0），否则会被判定为异常流量。

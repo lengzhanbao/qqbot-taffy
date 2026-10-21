@@ -54,11 +54,11 @@ def test_model_options_are_consistent_for_serial_and_race(model_bridge, ref, exp
         assert calls[0]["thinking"] == {"type": "disabled"}
 
 
-@pytest.mark.parametrize("ref,expected", [
-    ("opencode/deepseek-v4.1-flash", True),
-    ("opencode/longcat-2.5-preview-free", False),
+@pytest.mark.parametrize("ref,should_call", [
+    ("opencode/deepseek-v4.1-flash", False),
+    ("opencode/longcat-2.5-preview-free", True),
 ])
-def test_tool_requests_share_model_capabilities(model_bridge, ref, expected):
+def test_tool_planner_excludes_deepseek_aliases(model_bridge, ref, should_call):
     calls = []
     tool = {"id": "test-tool", "type": "function",
             "function": {"name": "search_web", "arguments": '{"query":"test"}'}}
@@ -69,9 +69,13 @@ def test_tool_requests_share_model_capabilities(model_bridge, ref, expected):
 
     model_bridge._run_api_call = fake
     result = asyncio.run(model_bridge._complete_with_tools("system", [], model_refs=[ref]))
-    assert result[0] == [tool]
-    assert calls[0]["tools"]
-    assert ("thinking" in calls[0]) is expected
+    if should_call:
+        assert result[0] == [tool]
+        assert calls[0]["tools"]
+        assert "thinking" not in calls[0]
+    else:
+        assert result == ([], "", "", [])
+        assert calls == []
 
 
 def test_empty_length_response_falls_back_without_leaking_options(model_bridge):

@@ -13,11 +13,11 @@ from pathlib import Path
 
 TOOL_NAME = "taffy_speak"
 CAPABILITY = (
-    "【语音能力】你现在可以用自己的声音直接回复群友，而且**你偏好用语音说话**："
-    "大约十次里有八次请调用 taffy_speak 说出来——这是你的默认做法。"
-    "只有这些情况用文字：回答里有代码、链接、表格或很长的列表；群友明确要求文字。"
-    "回答里有代码、链接、表格或很长的列表时用文字；群友明确要文字时也用文字。"
-    "taffy_speak 是最终回答形式，成功后不会再多发一份文字。"
+    "【语音能力】你可以用塔菲自己的声音直接回复群友。默认优先调用 taffy_speak，"
+    "让回复直接以语音发出；只有代码、链接、表格、很长的列表或群友明确要求文字时才用文字。"
+    "taffy_speak 的内容必须是完整最终答复；成功后不要再重复发送文字。"
+    "语音回复可以展开说，多聊几句，不用为了简短而砍掉内容。"
+    "语音服务失败时由程序自动回退文字。"
 )
 SPEAK_TOOL = {
     "type": "function",
@@ -207,16 +207,26 @@ class VoiceDelivery:
             return await text_fallback("queue_full")
         self.pending += 1
         try:
+            synthesis_started = time.monotonic()
             try:
                 segment = await asyncio.to_thread(self.synthesize, str(reply), reply.reply_id)
             except Exception as exc:
+                synthesis_ms = max(0, (time.monotonic() - synthesis_started) * 1000)
+                log(f"[TTS] id={reply.reply_id} synthesis={synthesis_ms:.0f}ms "
+                    f"state=error:{type(exc).__name__}")
                 return await text_fallback(type(exc).__name__)
+            synthesis_ms = max(0, (time.monotonic() - synthesis_started) * 1000)
+            log(f"[TTS] id={reply.reply_id} synthesis={synthesis_ms:.0f}ms state=ok")
             if not self._record(reply.reply_id, "sending", "voice", {}):
                 return await text_fallback("journal_unavailable")
+            send_started = time.monotonic()
             try:
                 result = await send_record(segment)
             except Exception as exc:
                 result = {"status": "unknown", "_delivery_state": "unknown", "msg": type(exc).__name__}
+            send_ms = max(0, (time.monotonic() - send_started) * 1000)
+            log(f"[语音发送] id={reply.reply_id} elapsed={send_ms:.0f}ms "
+                f"state={delivery_state(result)}")
             state = delivery_state(result)
             if state == "failed":
                 return await text_fallback("onebot_rejected")
