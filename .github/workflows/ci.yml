@@ -8,6 +8,8 @@ jobs:
     runs-on: windows-latest
     env:
       QQ_TEST_MODE: "1"
+      PYTHONIOENCODING: "utf-8"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,6 +19,16 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt -r requirements-dev.txt
+      - name: Python version and deps
+        run: |
+          python --version
+          pip list --format=freeze
       - name: Run tests
         run: |
-          python -m pytest tests/ -q
+          python -m pytest tests/ -q --tb=short -p no:cacheprovider 2>&1
+        id: tests
+      - name: Show pytest summary (on failure)
+        if: failure()
+        run: |
+          echo "=== pytest failed, rerunning with -x --lf for details ==="
+          python -m pytest tests/ -q --tb=long -p no:cacheprovider -x 2>&1 | Select-String -Pattern "FAILED|ERROR|assert" | Select-Object -First 30
