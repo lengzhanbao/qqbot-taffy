@@ -5358,6 +5358,18 @@ class SessionStore:
             self.save()
 
 # ---------- 桥接核心 ----------
+def _in_night_quiet(hour):
+    """夜间静默判断（可配置）。跨午夜时 start>end 视为 [start,24)+[0,end)。"""
+    if not PROACTIVE_NIGHT_QUIET:
+        return False
+    start, end = PROACTIVE_QUIET_START_HOUR, PROACTIVE_QUIET_END_HOUR
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
 class Bridge:
     def __init__(self):
         self.sessions = SessionStore(SESSIONS_FILE)
@@ -8367,7 +8379,7 @@ class Bridge:
                 or any(not q.empty() for q in getattr(self, "workers", {}).values())):
             return False
         local_now = self._proactive_now()
-        if local_now.hour < 8 or local_now.hour >= 23:
+        if _in_night_quiet(local_now.hour):
             return False
         version = observer.version(gid)
         # 2026-10-18：不再用关键词判断"话题敏不敏感"。实测误伤很重——
@@ -8622,7 +8634,7 @@ class Bridge:
                 observer.version(gid) != version or
                 getattr(self, "_direct_groups", set()) or
                 any(not q.empty() for q in getattr(self, "workers", {}).values()) or
-                self._proactive_now().hour < 8 or self._proactive_now().hour >= 23):
+                _in_night_quiet(self._proactive_now().hour)):
             log(f"[主动接话] group={gid} status=cancelled_stale_or_busy")
             return False
         # 主动接话的发送形式：语音 70%，文字 30%。

@@ -277,6 +277,12 @@ PROACTIVE_MIN_RECENT_MESSAGES = int(
     os.environ.get("QQ_PROACTIVE_MIN_RECENT", "1")
 )
 # 机器人刚在本群说过话后，这段时间内不主动接（避免连续插话）
+# 夜间静默：默认 23:00-8:00 不主动说话；QQ_PROACTIVE_NIGHT_QUIET=0 可关闭。
+# 注意：只影响"主动接话"，@ 和私聊永远正常回复。
+PROACTIVE_NIGHT_QUIET = os.environ.get("QQ_PROACTIVE_NIGHT_QUIET", "1") == "1"
+PROACTIVE_QUIET_START_HOUR = int(os.environ.get("QQ_PROACTIVE_QUIET_START", "23"))
+PROACTIVE_QUIET_END_HOUR = int(os.environ.get("QQ_PROACTIVE_QUIET_END", "8"))
+
 PROACTIVE_SELF_QUIET_SECONDS = int(
     os.environ.get("QQ_PROACTIVE_SELF_QUIET", "120")
 )
