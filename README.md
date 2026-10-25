@@ -1,12 +1,12 @@
 # QQBot · 永雏塔菲
 
-> A Taffy-themed QQ group AI bot — **DeepSeek** persona chat with short/long-term memory,
-> image understanding, **Bert-VITS2** voice replies and QQ Music cards,
-> running on **NapCat / OneBot v11**.
+> An open-source **Chinese QQ group chatbot / QQ bot** built with **Python**, **NapCat**, and **OneBot v11**.
+> Features a **DeepSeek-powered Taffy persona**, group memory, image understanding,
+> proactive chat, **Bert-VITS2 local TTS voice messages**, and QQ Music cards.
 >
-> **Keywords**: `qq-bot` `qqbot` `onebot` `onebot11` `napcat` `deepseek` `llm` `chatbot`
-> `ai-companion` `persona` `vtuber` `taffy` `tts` `bert-vits2` `vits` `voice-synthesis`
-> `agent-memory` `long-term-memory` `image-understanding` `python` `windows` `chinese`
+> **Search terms**: `qqbot` `qq-bot` `qq-group-bot` `chinese-chatbot` `python`
+> `napcat` `onebot11` `deepseek` `ai-chatbot` `ai-companion` `vtuber` `taffy`
+> `group-memory` `agent-memory` `image-understanding` `local-tts` `bert-vits2`
 
 基于 **NapCat + OneBot v11 + Python** 的 QQ 群机器人，角色固定为**永雏塔菲**（中文虚拟主播）的同人 AI 群友。
 
@@ -42,7 +42,7 @@
 | **@ 回复** | `TRIGGER=at`：被 @ 或私聊时正常回复 |
 | **主动接话** | 由**模型自己判断**是否开口，输出 `__QUIET__` 则沉默；代码只负责"是否允许说、是否太频繁" |
 | **群授权** | 逐群授权：`observe` / `knowledge_learning` / `knowledge_retrieval` / `style_learning` / `proactive_chat` |
-| **语音回复** | `taffy_speak` 工具：**DeepSeek 自己决定**发文字还是发语音；本地 Bert-VITS2（塔菲 V200 音色）合成，失败自动降级文字 |
+| **语音回复** | 普通 @ 回复默认优先语音，模型可按内容选择文字；主动接话决定开口后按当前桥接策略 70% 语音 / 30% 文字；本地 Bert-VITS2（V200）合成，失败自动降级文字 |
 | **点歌** | `/点歌 <歌名>`：搜 QQ 音乐并发送音乐卡片（无需 @，与对话流程解耦） |
 
 ### 分工原则
@@ -91,7 +91,7 @@ bridge_qq.py（主桥接）
 没被 @（主动接话）
   system  = 人格 + 自主群聊接话原则
   messages= 「群聊最近内容（按时间从早到晚）：昵称: 原话 … 最新消息：X」（带图则附多模态块）
-  决定    = 模型输出 __QUIET__ 则沉默，否则发送
+  决定    = 模型输出 __QUIET__ 则沉默；决定开口后由桥接按 70% 语音 / 30% 文字发送；TTS 失败回退文字
 ```
 
 ---
@@ -181,9 +181,9 @@ python restart_bridge_hidden.py
 
 ---
 
-## 语音（可选，默认关闭）
+## 语音回复（本地 TTS 服务可选部署）
 
-语音是**可选项**：TTS 服务没启动时，机器人照常文字聊天，不会报错、不会卡住。
+语音发送代码已集成。普通 @ 回复默认提示 DeepSeek 优先用语音，模型仍可按内容选择文字；主动接话在决定开口后按当前桥接策略发送 70% 语音、30% 文字。TTS 服务未启动或合成失败时自动回退文字，不会丢掉回复。
 
 ### 数据流
 
@@ -196,9 +196,9 @@ bridge_qq.ask_model()                        system = persona/taffy.md + 日期
   │    追加一段"语音能力"说明 + 注册 taffy_speak 工具（不覆盖已有工具）
   ▼
 DeepSeek（deepseek-v4.1-flash）
-  │  模型自己决定：
-  │    · 普通文本回答            → 走原有文字发送
-  │    · 调用 taffy_speak(text)  → 语音
+  │  普通 @ 回复：默认优先调用 taffy_speak，模型可按内容选择文字
+  │  主动接话：模型决定开口后，桥接按 70% 语音 / 30% 文字发送
+  │  TTS 未运行或失败：自动文字回退
   ▼
 voice_mod.final_speech_reply()               取工具参数里的完整回答，得到 VoiceReply
   │
@@ -296,7 +296,7 @@ python -m pytest tests -q
 
 > **注意必须带 `tests` 参数**：不带路径时 pytest 会从项目根目录收集，在本项目会产生大量收集错误。
 
-当前：**866 项通过**。
+测试数量随提交变化；运行上面的 pytest 命令查看当前结果。
 
 ---
 
