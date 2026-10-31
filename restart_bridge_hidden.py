@@ -117,17 +117,22 @@ def _find_bridge_pids():
 def _wait_for_health(proc, started_at, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            return False
+        try:
+            live_bridge_pids = set(_find_bridge_pids())
+        except RuntimeError:
+            live_bridge_pids = set()
         try:
             with open(HEALTH_FILE, encoding="utf-8") as stream:
                 state = json.load(stream)
-            if (state.get("pid") == proc.pid and state.get("ws_connected") is True
+            if (int(state.get("pid") or 0) in live_bridge_pids
+                    and state.get("ws_connected") is True
                     and datetime.fromisoformat(state["start_time"]).timestamp() >= started_at
                     and datetime.fromisoformat(state["updated_at"]).timestamp() >= started_at):
                 return True
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             pass
+        if proc.poll() is not None and not live_bridge_pids:
+            return False
         time.sleep(0.5)
     return False
 

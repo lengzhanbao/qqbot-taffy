@@ -213,7 +213,9 @@ def test_proactive_silence_without_model_calls(monkeypatch, mode):
     bridge.send_group_text.assert_not_awaited()
 
 
-@pytest.mark.parametrize("change", ["revoke", "topic", "busy", "quiet", "error"])
+# 2026-10-31：topic（群里来了新消息）不再取消已生成的回复——
+# 活跃群里 version 几乎每几秒就变，实测 10.7% 的尝试白扔在这里。
+@pytest.mark.parametrize("change", ["revoke", "busy", "quiet", "error"])
 def test_proactive_rechecks_state_before_send(monkeypatch, change):
     # 2026-10-17：主动发言不再限制字数（"too_long" 用例已移除，
     # 长回复现在应正常发出，不再被 45 字上限丢弃）。
@@ -234,6 +236,18 @@ def test_proactive_rechecks_state_before_send(monkeypatch, change):
     bridge._complete = complete
     assert not asyncio.run(bridge._maybe_proactive_group_reply({}, "42", "你是牛马吗"))
     bridge.send_group_text.assert_not_awaited()
+
+
+def test_proactive_reply_survives_new_messages_arriving(monkeypatch):
+    """群里又来了新消息，不应该把已经生成好的回复丢掉。"""
+    bridge = _ready(monkeypatch)
+    async def complete(*args, **kwargs):
+        bridge.observer.ingest({"group_id": "42", "user_id": "202", "message_id": "new",
+                                "message": [{"type": "text", "data": {"text": "换个话题"}}]})
+        return "小菲没答应加班！", bridge_qq.DEEPSEEK_MODEL_REF
+    bridge._complete = complete
+    assert asyncio.run(bridge._maybe_proactive_group_reply({}, "42", "你是牛马吗"))
+    bridge.send_group_text.assert_awaited_once()
 
 
 def test_proactive_is_independent_of_learning_and_directed_reply_preempts(monkeypatch):

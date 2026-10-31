@@ -16,8 +16,9 @@ class _FakeSessions:
         pass
 
 
-def test_group_message_sends_thinking_before_reply(monkeypatch):
+def test_group_message_sends_only_final_reply_by_default(monkeypatch):
     monkeypatch.setattr(bridge_qq, "_try_self_improve", lambda *a, **k: None)
+    assert bridge_qq.SEND_THINKING is False
 
     bridge = object.__new__(bridge_qq.Bridge)
     bridge.self_id = "900000000"
@@ -54,6 +55,4 @@ def test_group_message_sends_thinking_before_reply(monkeypatch):
 
     asyncio.run(bridge._process_group(event))
 
-    assert calls[0][0] == "thinking"
-    assert calls[0][2] == bridge_qq.THINKING_PLACEHOLDER
-    assert calls[1][0] == "reply"
+    assert calls == [("reply", "123", "456", "test reply")]

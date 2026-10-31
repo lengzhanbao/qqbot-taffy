@@ -226,7 +226,7 @@ voice_mod.VoiceDelivery.deliver()
 | --- | --- | --- | --- | --- | --- |
 | **Bert-VITS2** | [fishaudio/Bert-VITS2](https://github.com/fishaudio/Bert-VITS2) | 代码 `latest_version=2.3`，但塔菲模型 `version="2.0"` → 走 `oldVersion/V200` 推理路径 | **AGPL-3.0** | 代码约 50 MB | ❌ |
 | **塔菲音色权重** | 社区分享（B 站 [BV1hu4y1k78W](https://www.bilibili.com/video/BV1hu4y1k78W/)，作者 Xz乔希） | `G_7600.pth`；`config.json` 中 `version="2.0"`、`spk2id={"永雏塔菲":0}`、44.1kHz、128 mel、n_speakers=700 | 未明确（社区二创） | **673 MB** | ❌ |
-| **中文 BERT** | 哈工大讯飞 [chinese-roberta-wwm-ext-large](https://huggingface.co/hfl/chinese-roberta-wwm-ext-large) | bert / hidden 1024 / 24 层 / vocab 21128，提供中文音素特征 | **Apache-2.0** | **1246 MB** | ❌ |
+| **中文 BERT** | 哈工大讯飞 [chinese-roberta-wwm-ext-large](https://huggingface.co/hfl/chinese-roberta-wwm-ext-large) | 固定上游 revision；`scripts/download_tts_bert.ps1` 下载并校验 SHA-256 | **Apache-2.0** | **1246 MB** | ❌ |
 | 日文 / 英文 BERT | bert-base-japanese-v3、deberta-v3-large 等 | 仅 tokenizer，中文场景不用 | 各自 | 小 | ❌ |
 | **PyTorch** | [pytorch.org](https://pytorch.org) | **2.7.1+cu128**（RTX 50 系是 sm_120，低于 cu128 的轮子不支持） | BSD-3-Clause | 约 2.5 GB | ❌ |
 | Python（TTS 环境） | — | 3.10.20，独立于主程序（主程序 3.11） | PSF | — | — |
@@ -234,11 +234,12 @@ voice_mod.VoiceDelivery.deliver()
 | **NapCat** | [NapCat.Onebot](https://github.com/NapNeko/NapCatQQ) | 4.18.14，OneBot v11；`record` 段用 `base64://` 传输 | — | — | — |
 | **QQ 音乐搜索** | `c.y.qq.com/soso/fcgi-bin/client_search_cp` | 点歌功能，公开非官方接口 | — | — | — |
 
-### 为什么这些不进仓库
+### 模型权重获取与校验
 
-- **体积**：GitHub 单文件上限 100 MB，`pytorch_model.bin`（1246 MB）和 `G_7600.pth`（673 MB）都超了
-- **性质**：模型权重是第三方资产，仓库只放"如何接入"的代码
-- **数据**：合成音频与投递日志在 `data/tts/`，已被 `.gitignore` 排除
+- `pytorch_model.bin` 和 `G_7600.pth` 都远超普通 Git 单文件 100 MiB 上限；虽然 Git LFS 和 Release 附件可托管大文件，本仓库仍不把第三方模型权重塞进源码历史，避免克隆膨胀和额外下载配额消耗。
+- 中文 BERT 按固定 Hugging Face revision 下载。`scripts/tts_bert_manifest.json` 记录所需文件、版本和 SHA-256；下载脚本只补缺失文件。现存文件不匹配时会停止并保留，不会覆盖。
+- `G_7600.pth` 是社区二创权重，当前没有明确再分发许可，所以不上传 GitHub 或 Release。获得作者明确授权后，才考虑作为 Release 附件发布并提供校验值；现在仍需自行从原作者来源获取。
+- 合成音频与投递日志位于 `data/tts/`，已被 `.gitignore` 排除。
 
 ### 复现 TTS 环境
 
@@ -246,13 +247,16 @@ voice_mod.VoiceDelivery.deliver()
 # 1. 取 Bert-VITS2 代码（与仓库同级）
 git clone https://github.com/fishaudio/Bert-VITS2.git ../Bert-VITS2-master
 
-# 2. 放入塔菲权重（社区分享，需自行获取）
+# 2. 放入塔菲权重（需自行从原作者来源获取；本项目不分发该权重）
 #    ../Bert-VITS2-master/G_7600.pth
 #    ../Bert-VITS2-master/config.json       ← version 必须为 "2.0"
 
-# 3. 放入中文 BERT（Apache-2.0）
-#    ../Bert-VITS2-master/bert/chinese-roberta-wwm-ext-large/
-#      pytorch_model.bin + config.json + vocab.txt + tokenizer 相关文件
+# 3. 下载固定版本的中文 BERT（Apache-2.0，约 1.3 GB；按提示校验 SHA-256）
+.\scripts\download_tts_bert.ps1
+
+# 自定义 Bert-VITS2 目录时传入 -SourceRoot；只检查现有文件、不下载可用 -VerifyOnly
+# .\scripts\download_tts_bert.ps1 -SourceRoot "D:\Bert-VITS2-master"
+# .\scripts\download_tts_bert.ps1 -VerifyOnly
 
 # 4. 建独立环境：必须 cu128，否则 RTX 50 系（sm_120）跑不了
 python -m venv ../Bert-VITS2-master/.venv-tts

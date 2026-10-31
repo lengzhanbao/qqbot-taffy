@@ -129,8 +129,9 @@ def test_success_is_counted_after_send_acknowledgement(monkeypatch):
     assert not bot._proactive_inflight
 
 
+# 2026-10-31：stale（来了新消息）不再算失败——回复应该照常发出。
 @pytest.mark.parametrize("outcome", [
-    "quiet", "empty", "generate_error", "stale", "busy", "invalid", "send_error", "send_exception",
+    "quiet", "empty", "generate_error", "busy", "invalid", "send_error", "send_exception",
 ])
 def test_unsent_attempt_never_counts_as_success(monkeypatch, outcome):
     bot = _ready(monkeypatch)

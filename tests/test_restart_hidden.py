@@ -40,7 +40,7 @@ def test_process_discovery_filters_project_and_fails_closed(monkeypatch):
 
 
 @pytest.mark.parametrize("mode,expected", [
-    ("fresh", True), ("old_pid", False), ("stale_start", False),
+    ("fresh", True), ("child_pid", True), ("old_pid", False), ("stale_start", False),
     ("stale_update", False), ("disconnected", False), ("dead", False), ("invalid", False),
 ])
 def test_health_requires_fresh_connected_state_for_the_new_pid(monkeypatch, tmp_path, mode, expected):
@@ -59,10 +59,13 @@ def test_health_requires_fresh_connected_state_for_the_new_pid(monkeypatch, tmp_
     health = tmp_path / "health.json"
     health.write_text("invalid" if mode == "invalid" else json.dumps(state), encoding="utf-8")
     monkeypatch.setattr(launcher, "HEALTH_FILE", str(health))
+    live_pids = {10, 20} if mode == "child_pid" else ({20} if mode != "dead" else set())
+    monkeypatch.setattr(launcher, "_find_bridge_pids", lambda: sorted(live_pids))
     clock = iter([0, 0.1, 2])
     monkeypatch.setattr(launcher.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(launcher.time, "sleep", lambda _: None)
-    proc = SimpleNamespace(pid=20, poll=lambda: 1 if mode == "dead" else None)
+    proc = SimpleNamespace(pid=10 if mode == "child_pid" else 20,
+                           poll=lambda: 1 if mode == "dead" else None)
     assert launcher._wait_for_health(proc, started, timeout=1) is expected
 
 

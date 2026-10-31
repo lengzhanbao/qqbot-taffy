@@ -1,6 +1,7 @@
 # QQBot 项目备份：所有备份都放在 项目根目录 backups/，不写 C 盘。
 param(
-    [string]$Tag = ""
+    [string]$Tag = "",
+    [string[]]$AdditionalSources = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -109,6 +110,24 @@ if (Test-Path -LiteralPath $memoryDatabase) {
     $memorySnapshot = ($snapshotJson | ConvertFrom-Json).snapshot
 }
 
+$externalCopies = @()
+$index = 0
+foreach ($source in $AdditionalSources) {
+    $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+    if (-not $sourceItem.PSIsContainer -or $sourceItem.LinkType) {
+        throw "额外备份来源必须是普通目录: $source"
+    }
+    $index++
+    $name = '{0:D2}_{1}' -f $index, ($sourceItem.Name -replace '[^A-Za-z0-9_-]', '_')
+    $destination = Join-Path (Join-Path $backupDir 'external') $name
+    $links = @(Get-ChildItem -LiteralPath $sourceItem.FullName -Force -Recurse | Where-Object { $_.LinkType } | ForEach-Object {
+        [ordered]@{ path = $_.FullName.Substring($sourceItem.FullName.Length).TrimStart('\', '/'); type = $_.LinkType; target = @($_.Target) }
+    })
+    & robocopy $sourceItem.FullName $destination /E /XJ /R:1 /W:1 /COPY:DAT /DCOPY:DAT /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "额外目录备份失败 (robocopy $LASTEXITCODE): $source" }
+    $externalCopies += [ordered]@{ source = $sourceItem.FullName; destination = $destination; excluded_links = $links }
+}
+
 $manifest = [ordered]@{
     created_at = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     tag = $Tag
@@ -116,8 +135,9 @@ $manifest = [ordered]@{
     backup_dir = $backupDir
     files = $copied
     agent_memory_snapshot = $memorySnapshot
+    external_copies = $externalCopies
 }
-$manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backupDir "manifest.json") -Encoding UTF8
+$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupDir "manifest.json") -Encoding UTF8
 
 Write-Output "备份完成: $backupDir"
 foreach ($rel in $copied) {

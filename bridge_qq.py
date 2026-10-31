@@ -8557,7 +8557,9 @@ class Bridge:
             "回答群友的问题、吐槽半句、好奇问一句，都是自然参与；"
             "看不懂的梗也可以接（问一句\"这是什么梗\"），群友组队约玩时可以凑一句。"
             "回答可以展开一点，多说几句没问题。\n"
-            "只有刚说过差不多的话才保持沉默——其他情况默认开口。\n"
+            "**沉默只留给一种情况：你刚说过几乎一样的话。**"
+            "群友闲聊、附和、吐槽、接梗、发问，都算可以参与的场合——"
+            "哪怕只是接半句、笑一声、反问一句，也比不说话好。\n"
             "决定说话就直接输出自然的回复，不要解释自己为什么要说话，"
             "也不要输出判断理由、评分或其他标记。\n"
             "决定不发言时，只输出 __QUIET__，不要输出任何其他内容。\n"
@@ -8630,8 +8632,11 @@ class Bridge:
             log(f"[主动接话] group={gid} status=discarded_invalid")
             return False
 
+        # 2026-10-31：不再因为"群里又来了新消息"(version 变化) 就丢弃回复。
+        # 活跃群里 version 几乎每几秒就变，之前实测 11% 的尝试死在这里——
+        # 模型明明已经生成好回复，却因为别人插了一句就白扔。
+        # 现在只保留真正该取消的条件：撤权、被 @ 抢答、夜间静默。
         if (not self._group_allowed(gid, "proactive_chat") or
-                observer.version(gid) != version or
                 getattr(self, "_direct_groups", set()) or
                 any(not q.empty() for q in getattr(self, "workers", {}).values()) or
                 _in_night_quiet(self._proactive_now().hour)):

@@ -1,0 +1,49 @@
+{
+  "repo_id": "hfl/chinese-roberta-wwm-ext-large",
+  "revision": "a25cc9e05974bd9687e528edd516f2cfdb3f5db9",
+  "license": "apache-2.0",
+  "files": [
+    {
+      "name": "pytorch_model.bin",
+      "size": 1306484351,
+      "sha256": "4AC62D49144D770C5CA9A5D1D3039C4995665A080FEBE63198189857C6BD11CD",
+      "allow_trailing_lf": false
+    },
+    {
+      "name": "config.json",
+      "size": 690,
+      "sha256": "53D086DAF0CCDDDBEB78F8798F34C685A3C48089FA21EC61300527F083FA2563",
+      "allow_trailing_lf": true
+    },
+    {
+      "name": "added_tokens.json",
+      "size": 2,
+      "sha256": "44136FA355B3678A1146AD16F7E8649E94FB4FC21FE77E8310C060F61CAAFF8A",
+      "allow_trailing_lf": true
+    },
+    {
+      "name": "special_tokens_map.json",
+      "size": 112,
+      "sha256": "303DF45A03609E4EAD04BC3DC1536D0AB19B5358DB685B6F3DA123D05EC200E3",
+      "allow_trailing_lf": true
+    },
+    {
+      "name": "tokenizer_config.json",
+      "size": 19,
+      "sha256": "61785AEABA176FBA6D6489F27DCCFD2DDEE6AEE2AF0E590451CAB7D8B57E0874",
+      "allow_trailing_lf": true
+    },
+    {
+      "name": "tokenizer.json",
+      "size": 268961,
+      "sha256": "53FF61207898738BBDC000F38ABEBEF01041C8D23B6270C11855FC692D0A3AD6",
+      "allow_trailing_lf": true
+    },
+    {
+      "name": "vocab.txt",
+      "size": 109540,
+      "sha256": "45BBAC6B341C319ADC98A532532882E91A9CEFC0329AA57BAC9AE761C27B291C",
+      "allow_trailing_lf": true
+    }
+  ]
+}
